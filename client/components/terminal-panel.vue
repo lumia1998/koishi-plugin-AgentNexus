@@ -201,6 +201,40 @@ async function close() {
     box-sizing: border-box;
 }
 
+.terminal-host :deep(.xterm) {
+    height: 100%;
+}
+
+.terminal-host :deep(.xterm-viewport) {
+    overflow-y: auto !important;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+.terminal-host :deep(.xterm-viewport::-webkit-scrollbar) {
+    width: 8px;
+}
+
+.terminal-host :deep(.xterm-viewport::-webkit-scrollbar-track) {
+    margin: 4px 0;
+    background: transparent;
+}
+
+.terminal-host :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background-clip: content-box;
+    background-color: rgba(148, 163, 184, 0.35);
+}
+
+.terminal-host :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) {
+    background-color: rgba(203, 213, 225, 0.55);
+}
+
+.terminal-host :deep(.xterm-viewport::-webkit-scrollbar-corner) {
+    background: transparent;
+}
+
 .terminal-error {
     position: absolute;
     inset: 0;

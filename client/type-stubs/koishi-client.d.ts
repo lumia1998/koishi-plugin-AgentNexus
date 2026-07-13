@@ -3,6 +3,7 @@ export interface Context {
         name: string
         id?: string
         path: string
+        icon?: string
         authority?: number
         order?: number
         component: unknown
@@ -10,3 +11,16 @@ export interface Context {
 }
 
 export const send: (name: string, ...args: any[]) => Promise<any>
+
+export const icons: {
+    register(
+        name: string,
+        icon:
+            | string
+            | {
+                  type: 'svg'
+                  viewBox?: string
+                  body: string
+              }
+    ): void
+}
