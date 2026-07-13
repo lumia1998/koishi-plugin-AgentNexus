@@ -1,3 +1,5 @@
+import type { Component } from 'vue'
+
 export interface Context {
     page(options: {
         name: string
@@ -13,14 +15,5 @@ export interface Context {
 export const send: (name: string, ...args: any[]) => Promise<any>
 
 export const icons: {
-    register(
-        name: string,
-        icon:
-            | string
-            | {
-                  type: 'svg'
-                  viewBox?: string
-                  body: string
-              }
-    ): void
+    register(name: string, component: Component): void
 }
