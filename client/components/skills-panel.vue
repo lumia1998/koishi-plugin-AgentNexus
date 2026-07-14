@@ -116,7 +116,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { NexusConfig, NexusStatus } from '../../src/types'
 
@@ -147,6 +147,18 @@ const hostId = ref<string>()
 const keyword = ref('')
 const syncing = ref(false)
 const showImport = ref(false)
+
+watch(
+    () => props.config.defaultHostId || props.config.hosts[0]?.id,
+    (id) => {
+        if (!hostId.value && id) hostId.value = id
+    },
+    { immediate: true }
+)
+
+watch(hostId, (id, previous) => {
+    if (id && id !== previous) emit('refresh', id)
+})
 
 const filteredSkills = computed(() => {
     const text = keyword.value.trim().toLowerCase()

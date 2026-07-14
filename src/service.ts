@@ -16,7 +16,7 @@ import type {
     SshHostConfig,
     TerminalInfo
 } from './types'
-import { createDefaultNexusConfig } from './config'
+import { createDefaultNexusConfig, createHost } from './config'
 import { SshSessionPool } from './ssh/pool'
 import type { SshSession, TerminalHandle } from './ssh/session'
 import { getAdapter, listAdapters } from './adapters'
@@ -37,8 +37,11 @@ import {
     isRemotePathWithinRoot
 } from './utils/security'
 import {
+    assertUniqueHostName,
     hostConnectionChanged,
     mergeHostSecrets,
+    normalizeHostName,
+    patchHostConfig,
     redactNexusConfig,
     repairHostIds,
     resolveHostReference
@@ -64,7 +67,7 @@ export class AgentNexusService extends Service {
     private proxy: NexusTerminalProxy
     private terminals = new Map<string, Map<string, ManagedTerminal>>()
     private agentCache = new Map<string, DetectedAgent[]>()
-    private skillCache: SkillInfo[] = []
+    private skillCache = new Map<string, SkillInfo[]>()
     private toolDispose: (() => void)[] = []
     private reconnectTimer?: NodeJS.Timeout
     private reconnecting = false
@@ -93,9 +96,9 @@ export class AgentNexusService extends Service {
         })
         this.proxy.start()
         this.syncTools()
-        void this.ensureDefaultConnection(true)
+        void this.ensureEnabledConnections(true)
         this.reconnectTimer = setInterval(() => {
-            void this.ensureDefaultConnection()
+            void this.ensureEnabledConnections()
         }, 30000)
         await this.refreshConsoleData()
     }
@@ -142,23 +145,110 @@ export class AgentNexusService extends Service {
         for (const previous of this.nexusConfig.hosts) {
             const next = hosts.find((host) => host.id === previous.id)
             if (!nextHostIds.has(previous.id) || (next && hostConnectionChanged(previous, next))) {
+                this.closeTerminalsByHost(previous.id)
                 await this.pool.destroyByHost(previous.id)
                 this.agentCache.delete(previous.id)
+                this.skillCache.delete(previous.id)
                 this.hostErrors.delete(previous.id)
             }
+            if (!nextHostIds.has(previous.id)) {
+                this.pool.release(previous.id)
+            }
         }
-        if (
-            this.nexusConfig.defaultHostId &&
-            this.nexusConfig.defaultHostId !== nextConfig.defaultHostId
-        ) {
-            this.pool.release(this.nexusConfig.defaultHostId)
+        for (const host of hosts) {
+            if (!host.enabled) this.pool.release(host.id)
         }
         this.nexusConfig = nextConfig
         await this.writeConfigFile()
         this.syncTools()
-        for (const hostId of scanHostIds) await this.scanAgents(hostId)
-        void this.ensureDefaultConnection()
+        // SSH connect/scan must not block console save responses.
+        void this.afterConfigSaved(scanHostIds)
         await this.refreshConsoleData()
+    }
+
+    private async afterConfigSaved(scanHostIds: string[]) {
+        for (const hostId of scanHostIds) {
+            try {
+                await this.scanAgents(hostId)
+            } catch (err) {
+                this.hostErrors.set(hostId, getErrorMessage(err))
+                this.ctx.logger.warn(
+                    `[agent-nexus] scan after save failed (${hostId}): ${getErrorMessage(err)}`
+                )
+            }
+        }
+        await this.ensureEnabledConnections()
+    }
+
+    async saveHost(
+        input: Partial<SshHostConfig> & { setAsDefault?: boolean }
+    ): Promise<{ hostId: string; data: NexusConsoleData }> {
+        const name = input.name !== undefined ? normalizeHostName(input.name) : undefined
+        const explicitId = typeof input.id === 'string' ? input.id.trim() : ''
+        let hostId = explicitId || undefined
+
+        if (hostId) {
+            const idx = this.nexusConfig.hosts.findIndex((h) => h.id === hostId)
+            if (idx < 0) throw new Error(`Host not found: ${hostId}`)
+            if (name !== undefined) {
+                assertUniqueHostName(this.nexusConfig.hosts, name, hostId)
+            }
+            const { setAsDefault: _setAsDefault, id: _id, ...hostInput } = input
+            const patched = patchHostConfig(this.nexusConfig.hosts[idx], {
+                ...hostInput,
+                ...(name !== undefined ? { name } : {})
+            })
+            const hosts = this.nexusConfig.hosts.map((host, index) =>
+                index === idx ? patched : host
+            )
+            hostId = patched.id
+            await this.saveConfig({
+                ...this.nexusConfig,
+                hosts,
+                defaultHostId:
+                    input.setAsDefault || !this.nexusConfig.defaultHostId
+                        ? hostId
+                        : this.nexusConfig.defaultHostId
+            })
+        } else {
+            const hostName = assertUniqueHostName(
+                this.nexusConfig.hosts,
+                name || `SSH Computer ${this.nexusConfig.hosts.length + 1}`
+            )
+            const { setAsDefault: _setAsDefault, id: _id, ...hostInput } = input
+            const host = createHost({
+                ...hostInput,
+                name: hostName
+            })
+            hostId = host.id
+            await this.saveConfig({
+                ...this.nexusConfig,
+                hosts: [...this.nexusConfig.hosts, host],
+                defaultHostId:
+                    input.setAsDefault || !this.nexusConfig.defaultHostId
+                        ? hostId
+                        : this.nexusConfig.defaultHostId
+            })
+        }
+
+        // Kick a focused connect/scan for this host without blocking the RPC.
+        void this.scanAgents(hostId).catch((err) => {
+            this.hostErrors.set(hostId!, getErrorMessage(err))
+        })
+
+        return { hostId: hostId!, data: this.getConsoleData() }
+    }
+
+    async removeHost(hostId: string) {
+        const hosts = this.nexusConfig.hosts.filter((h) => h.id !== hostId)
+        await this.saveConfig({
+            ...this.nexusConfig,
+            hosts,
+            defaultHostId:
+                this.nexusConfig.defaultHostId === hostId
+                    ? hosts[0]?.id
+                    : this.nexusConfig.defaultHostId
+        })
     }
 
     getStatus(): NexusStatus {
@@ -188,16 +278,29 @@ export class AgentNexusService extends Service {
             }
         })
 
+        const defaultHostId =
+            this.nexusConfig.defaultHostId || this.nexusConfig.hosts[0]?.id
+        const skillHostId =
+            (defaultHostId && this.skillCache.has(defaultHostId) && defaultHostId) ||
+            this.skillCache.keys().next().value ||
+            defaultHostId
+        const skillItems = (skillHostId && this.skillCache.get(skillHostId)) || []
         return {
             enabled: this.nexusConfig.hosts.some((h) => h.enabled),
-            defaultHostId: this.nexusConfig.defaultHostId || this.nexusConfig.hosts[0]?.id,
+            defaultHostId,
             hosts,
             skills: {
-                total: this.skillCache.length,
-                items: this.skillCache
+                total: skillItems.length,
+                items: skillItems,
+                hostId: skillHostId
             },
             activeSessions: this.pool.list().length
         }
+    }
+
+    getSkillsForHost(hostId?: string): SkillInfo[] {
+        const host = this.resolveHost(hostId)
+        return this.skillCache.get(host.id) || []
     }
 
     getConsoleData(): NexusConsoleData {
@@ -277,12 +380,13 @@ export class AgentNexusService extends Service {
     async refreshSkills(hostId?: string) {
         const host = this.resolveHost(hostId)
         const session = await this.pool.getOrCreate(host)
-        this.skillCache = await listRemoteSkills(
+        const items = await listRemoteSkills(
             session,
             this.nexusConfig,
             this.installedAgentKinds(host.id)
         )
-        return this.skillCache
+        this.skillCache.set(host.id, items)
+        return items
     }
 
     async syncSkill(source: SkillSourceConfig, hostId?: string) {
@@ -303,7 +407,8 @@ export class AgentNexusService extends Service {
             else this.nexusConfig.skills.push(next)
             await this.writeConfigFile()
 
-            this.skillCache = await listRemoteSkills(session, this.nexusConfig, agents)
+            const items = await listRemoteSkills(session, this.nexusConfig, agents)
+            this.skillCache.set(host.id, items)
             return info
         } catch (err) {
             const failed = { ...source, lastError: getErrorMessage(err) }
@@ -466,15 +571,17 @@ export class AgentNexusService extends Service {
         input: { hostId?: string; cols?: number; rows?: number; cwd?: string } = {}
     ): Promise<TerminalInfo> {
         if (!this.ctx.server) throw new Error('Koishi server service is required for terminals')
+        if (!this.nexusConfig.hosts.length) {
+            throw new Error('还没有配置 SSH 设备，请先在 Computer 页面添加。')
+        }
         const host = this.resolveHost(input.hostId)
-        const session = await this.pool.getOrCreate(
-            host,
-            `console:${clientId}:${host.id}`
-        )
+        // Prefer the shared host connection when present; fall back to a console-scoped session.
+        const session = await this.pool.getOrCreate(host)
         const terminal = await session.createTerminal({
             cols: input.cols,
             rows: input.rows,
-            cwd: input.cwd || host.cwd
+            cwd: input.cwd || host.cwd,
+            timeoutMs: 20_000
         })
         const token = randomUUID()
         const map =
@@ -536,6 +643,18 @@ export class AgentNexusService extends Service {
         item.terminal.kill()
         map?.delete(terminalId)
         if (map && map.size < 1) this.terminals.delete(sessionId)
+    }
+
+    private closeTerminalsByHost(hostId: string) {
+        for (const [sessionId, map] of this.terminals) {
+            for (const [terminalId, item] of map) {
+                if (item.hostId !== hostId) continue
+                if (item.expiryTimer) clearTimeout(item.expiryTimer)
+                item.terminal.kill()
+                map.delete(terminalId)
+            }
+            if (map.size < 1) this.terminals.delete(sessionId)
+        }
     }
 
     private async closeAllTerminals() {
@@ -636,37 +755,60 @@ export class AgentNexusService extends Service {
             .map((agent) => agent.kind)
     }
 
-    private async ensureDefaultConnection(scan = false) {
+    private async ensureEnabledConnections(scan = false) {
         if (this.reconnecting) return
-        const host = this.nexusConfig.hosts.find(
-            (item) => item.id === this.nexusConfig.defaultHostId && item.enabled
-        ) ?? this.nexusConfig.hosts.find((item) => item.enabled)
-        if (!host) return
+        const hosts = this.nexusConfig.hosts.filter((item) => item.enabled)
+        if (!hosts.length) return
 
         this.reconnecting = true
-        this.pool.keepAlive(host.id)
         try {
-            await this.pool.getOrCreate(host)
-            if (scan || !this.agentCache.has(host.id)) await this.scanAgents(host.id)
-        } catch (err) {
-            this.hostErrors.set(host.id, getErrorMessage(err))
-            this.ctx.logger.warn(`[agent-nexus] SSH reconnect failed: ${getErrorMessage(err)}`)
+            for (const host of hosts) {
+                this.pool.keepAlive(host.id)
+                try {
+                    await this.pool.getOrCreate(host)
+                    if (scan || !this.agentCache.has(host.id)) {
+                        await this.scanAgents(host.id)
+                    }
+                } catch (err) {
+                    this.hostErrors.set(host.id, getErrorMessage(err))
+                    this.ctx.logger.warn(
+                        `[agent-nexus] SSH reconnect failed (${host.name}): ${getErrorMessage(err)}`
+                    )
+                }
+            }
+            for (const host of this.nexusConfig.hosts) {
+                if (!host.enabled) this.pool.release(host.id)
+            }
         } finally {
             this.reconnecting = false
         }
     }
 
     private resolveHost(hostId?: string): SshHostConfig {
-        if (hostId) return this.requireHost(hostId)
-        const id = this.nexusConfig.defaultHostId || this.nexusConfig.hosts.find((h) => h.enabled)?.id
-        if (!id) throw new Error('No SSH host configured.')
+        const reference = hostId?.trim()
+        if (reference) return this.requireHost(reference)
+        if (!this.nexusConfig.hosts.length) {
+            throw new Error('还没有配置 SSH 设备，请先在 Computer 页面添加。')
+        }
+        const id =
+            this.nexusConfig.defaultHostId ||
+            this.nexusConfig.hosts.find((h) => h.enabled)?.id ||
+            this.nexusConfig.hosts[0]?.id
+        if (!id) throw new Error('还没有可用的 SSH 设备，请先在 Computer 页面添加。')
         return this.requireHost(id)
     }
 
     private requireHost(hostId: string) {
         const host = resolveHostReference(this.nexusConfig.hosts, hostId)
-        if (!host) throw new Error(`Host not found: ${hostId}`)
-        if (!host.enabled) throw new Error(`Host disabled: ${host.name}`)
+        if (!host) {
+            const names = this.nexusConfig.hosts.map((item) => item.name).join('、')
+            throw new Error(
+                names
+                    ? `找不到设备“${hostId}”。当前设备：${names}`
+                    : `找不到设备“${hostId}”，请先在 Computer 页面添加。`
+            )
+        }
+        if (!host.enabled) throw new Error(`设备已禁用：${host.name}`)
         return host
     }
 

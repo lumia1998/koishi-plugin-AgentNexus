@@ -8,7 +8,10 @@ export class NexusListAgentsTool extends NexusToolBase {
         'List remote SSH hosts and installed code agents (hermes/openclaw/claude/opencode/codex).'
 
     schema = z.object({
-        hostId: z.string().optional().describe('Optional host id to scan only one host'),
+        hostId: z
+            .string()
+            .optional()
+            .describe('Optional host id, device name, or address to scan only one host'),
         refresh: z.boolean().optional().describe('Re-detect agents on the host')
     })
 
@@ -30,10 +33,12 @@ export class NexusListAgentsTool extends NexusToolBase {
                         .map((a) => `${a.kind}${a.version ? `@${a.version}` : ''}`)
                         .join(', ')
                     return [
-                        `${host.name} (${host.id})`,
+                        `name: ${host.name}`,
+                        `  id: ${host.id}`,
                         `  target: ${host.host}`,
                         `  state: ${host.state}${host.error ? ` - ${host.error}` : ''}`,
-                        `  agents: ${agents || '(none detected)'}`
+                        `  agents: ${agents || '(none detected)'}`,
+                        `  use hostId: "${host.name}" or "${host.id}"`
                     ].join('\n')
                 })
                 .join('\n\n')

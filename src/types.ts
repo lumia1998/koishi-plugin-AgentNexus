@@ -84,6 +84,7 @@ export interface NexusStatus {
     skills: {
         total: number
         items: SkillInfo[]
+        hostId?: string
     }
     activeSessions: number
 }

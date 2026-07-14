@@ -20,6 +20,7 @@ export class SshSessionPool {
             try {
                 for (const [key, session] of this.sessions) {
                     if (this.persistent.has(key)) continue
+                    if (session.hasActiveOperations()) continue
                     const timeout = getTimeout(session.hostId)
                     if (now - session.lastActiveAt < timeout) continue
                     this.sessions.delete(key)

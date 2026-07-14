@@ -7,7 +7,6 @@ import type {
     SkillSourceConfig,
     SshHostConfig
 } from '../types'
-import { createHost } from '../config'
 import { randomUUID } from 'crypto'
 
 export const name = 'agent-nexus-webui'
@@ -32,31 +31,16 @@ export function apply(ctx: Context) {
         return { success: true }
     })
 
-    ctx.console.addListener('agent-nexus/saveHost', async (input: Partial<SshHostConfig>) => {
-        const cfg = structuredClone(nexus().getConfig())
-        let hostId = input.id
-        if (input.id) {
-            const idx = cfg.hosts.findIndex((h) => h.id === input.id)
-            if (idx < 0) throw new Error(`Host not found: ${input.id}`)
-            cfg.hosts[idx] = { ...cfg.hosts[idx], ...input } as SshHostConfig
-        } else {
-            const host = createHost({
-                ...input,
-                name: input.name || `SSH Computer ${cfg.hosts.length + 1}`
-            })
-            hostId = host.id
-            cfg.hosts.push(host)
+    ctx.console.addListener(
+        'agent-nexus/saveHost',
+        async (input: Partial<SshHostConfig> & { setAsDefault?: boolean }) => {
+            const result = await nexus().saveHost(input)
+            return { success: true, hostId: result.hostId, data: result.data }
         }
-        if (!cfg.defaultHostId) cfg.defaultHostId = cfg.hosts[0]?.id
-        await nexus().saveConfig(cfg)
-        return { success: true, hostId: hostId!, data: nexus().getConsoleData() }
-    })
+    )
 
     ctx.console.addListener('agent-nexus/removeHost', async (hostId: string) => {
-        const cfg = structuredClone(nexus().getConfig())
-        cfg.hosts = cfg.hosts.filter((h) => h.id !== hostId)
-        if (cfg.defaultHostId === hostId) cfg.defaultHostId = cfg.hosts[0]?.id
-        await nexus().saveConfig(cfg)
+        await nexus().removeHost(hostId)
         return { success: true }
     })
 
@@ -133,7 +117,7 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/getConsoleData'(): Promise<import('../types').NexusConsoleData>
         'agent-nexus/saveConfig'(cfg: import('../types').NexusConfig): Promise<{ success: boolean }>
         'agent-nexus/saveHost'(
-            input: Partial<import('../types').SshHostConfig>
+            input: Partial<import('../types').SshHostConfig> & { setAsDefault?: boolean }
         ): Promise<{
             success: boolean
             hostId: string

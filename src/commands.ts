@@ -32,7 +32,7 @@ export function registerNexusCommands(
             .command(`${name} <prompt:text>`, description, {
                 authority: config.commandAuthority
             })
-            .option('host', '-H <host:string> 指定 SSH 主机 ID、地址或名称')
+            .option('host', '-H <host:string> 指定设备名称、地址或 ID（多机时也可直接写：名称 任务）')
             .option('cwd', '-C <cwd:string> 指定远端工作目录')
             .option('model', '-m <model:string> 指定模型')
             .option('timeout', '-t <seconds:posint> 超时时间（秒）')

@@ -5,6 +5,7 @@ import type { AgentNexusService } from './service'
 
 export class NexusTerminalProxy {
     private layer?: { close(): void }
+    private sockets = new Set<WebSocket>()
 
     constructor(
         private ctx: Context,
@@ -29,6 +30,12 @@ export class NexusTerminalProxy {
     stop() {
         this.layer?.close()
         this.layer = undefined
+        for (const socket of this.sockets) {
+            try {
+                socket.close()
+            } catch {}
+        }
+        this.sockets.clear()
     }
 
     private async accept(socket: WebSocket, request: IncomingMessage) {
@@ -50,14 +57,45 @@ export class NexusTerminalProxy {
             socket.close()
             return
         }
+        this.sockets.add(socket)
 
-        const off = item.terminal.onData((data) => {
-            if (socket.readyState === socket.OPEN) {
-                socket.send(JSON.stringify({ type: 'data', data }))
+        let cleaned = false
+        let offData: () => void = () => undefined
+        let offTerminalClose: () => void = () => undefined
+        const cleanup = () => {
+            if (cleaned) return
+            cleaned = true
+            offData()
+            offTerminalClose()
+            this.sockets.delete(socket)
+            this.service.handleTerminalClose(sessionId, terminalId)
+        }
+
+        socket.once('close', cleanup)
+        socket.once('error', cleanup)
+        offTerminalClose = item.terminal.onClose(() => {
+            cleanup()
+            try {
+                socket.close()
+            } catch {}
+        })
+        offData = item.terminal.onData((data) => {
+            if (socket.readyState !== socket.OPEN) return
+            if (socket.bufferedAmount > 2 * 1024 * 1024) {
+                item.terminal.kill()
+                socket.close(1013, 'terminal output backpressure limit exceeded')
+                return
             }
+            socket.send(JSON.stringify({ type: 'data', data }), (err) => {
+                if (err) cleanup()
+            })
         })
 
         socket.on('message', (chunk) => {
+            if (terminalMessageSize(chunk) > 64 * 1024) {
+                socket.close(1009, 'terminal message too large')
+                return
+            }
             const text = Buffer.isBuffer(chunk)
                 ? chunk.toString('utf8')
                 : String(chunk)
@@ -83,10 +121,14 @@ export class NexusTerminalProxy {
                 item.terminal.sendInput(text)
             }
         })
-
-        socket.on('close', () => {
-            off()
-            this.service.handleTerminalClose(sessionId, terminalId)
-        })
     }
+}
+
+export function terminalMessageSize(chunk: unknown) {
+    if (Buffer.isBuffer(chunk)) return chunk.length
+    if (chunk instanceof ArrayBuffer) return chunk.byteLength
+    if (Array.isArray(chunk)) {
+        return chunk.reduce((size, item) => size + terminalMessageSize(item), 0)
+    }
+    return Buffer.byteLength(String(chunk))
 }

@@ -17,18 +17,18 @@
             </div>
         </div>
 
-        <div class="stats">
+            <div class="stats">
             <div class="stat-card">
                 <div class="stat-label">主机</div>
                 <div class="stat-value">{{ overview.hostLabel }}</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">可用 Agent</div>
-                <div class="stat-value">{{ overview.agentCount }}</div>
+                <div class="stat-label">已连接</div>
+                <div class="stat-value">{{ overview.connectedCount }}</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Skills</div>
-                <div class="stat-value">{{ status.skills.total || 0 }}</div>
+                <div class="stat-label">可用 Agent</div>
+                <div class="stat-value">{{ overview.agentCount }}</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">活跃会话</div>
@@ -81,7 +81,18 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ComputerPanel from './components/computer-panel.vue'
 import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
-import type { NexusConfig, NexusStatus } from '../src/types'
+import type { NexusConfig, NexusStatus, SshAuth } from '../src/types'
+
+type ComputerConnectInput = {
+    id?: string
+    name: string
+    host: string
+    port: number
+    username: string
+    auth?: SshAuth
+    cwd?: string
+    setAsDefault?: boolean
+}
 
 const tabs = ['computer', 'skills', 'terminal'] as const
 const tabLabel = {
@@ -120,14 +131,24 @@ const status = ref<NexusStatus>({
 })
 
 const overview = computed(() => {
-    const host = status.value.hosts[0]
-    const agents = host?.agents || []
-    const agentCount = agents.filter((item) => item.installed).length
-    const connected = !!host && (host.sessionCount > 0 || agentCount > 0)
+    const hosts = status.value.hosts
+    const connectedCount = hosts.filter((item) => item.state === 'connected').length
+    const agentCount = hosts.reduce(
+        (sum, item) => sum + item.agents.filter((agent) => agent.installed).length,
+        0
+    )
+    const defaultHost =
+        hosts.find((item) => item.id === status.value.defaultHostId) || hosts[0]
+    const hostLabel = !hosts.length
+        ? '未配置'
+        : hosts.length === 1
+          ? defaultHost?.name || defaultHost?.host || '1 台'
+          : `${hosts.length} 台 · ${connectedCount} 已连接`
     return {
-        connected,
+        connected: connectedCount > 0,
+        connectedCount,
         agentCount,
-        hostLabel: host ? `${host.host}` : '未配置'
+        hostLabel
     }
 })
 
@@ -149,59 +170,73 @@ async function autoConnectAndScan() {
         config.value.defaultHostId ||
         config.value.hosts.find((host) => host.enabled)?.id ||
         config.value.hosts[0]?.id
-    if (!hostId || connecting.value) return
+    if (!hostId) return
 
     const hostStatus = status.value.hosts.find((item) => item.id === hostId)
     const hasAgents = (hostStatus?.agents || []).some((agent) => agent.installed)
-    if (hostStatus && hostStatus.sessionCount > 0 && hasAgents) return
+    if (hostStatus && (hostStatus.state === 'connected' || hasAgents)) return
 
-    connecting.value = true
+    // Do not toggle the main connecting flag — that freezes the Computer UI.
     try {
-        await send('agent-nexus/testHost', hostId)
-        status.value = await send('agent-nexus/scanAgents', hostId)
+        await Promise.race([
+            (async () => {
+                await send('agent-nexus/testHost', hostId)
+                status.value = await send('agent-nexus/scanAgents', hostId)
+            })(),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('auto connect timeout')), 25000)
+            )
+        ])
     } catch {
-        // keep silent on page-load auto connect; manual button still surfaces errors
+        // keep silent on page-load auto connect
     } finally {
-        connecting.value = false
-        try {
-            const data = await send('agent-nexus/getConsoleData')
-            config.value = data.config
-            status.value = data.status
-        } catch {}
+        await reloadQuiet()
     }
 }
 
-async function connectComputer(input: {
-    id?: string
-    name: string
-    host: string
-    port: number
-    username: string
-    password: string
-}, done: (hostId: string) => void) {
+async function connectComputer(input: ComputerConnectInput, done: (hostId: string) => void) {
     connecting.value = true
     try {
-        const result = await send('agent-nexus/saveHost', {
-            id: input.id,
+        const payload: Record<string, unknown> = {
             name: input.name,
             host: input.host,
             port: input.port,
             username: input.username,
-            auth: { type: 'password', password: input.password },
             enabled: true,
-            defaultAgent: 'auto',
-            idleTimeoutMs: 15 * 60 * 1000
-        })
+            setAsDefault: input.setAsDefault
+        }
+        // Only send id when editing an existing device.
+        if (input.id) payload.id = input.id
+        if (input.cwd !== undefined) payload.cwd = input.cwd
+        if (input.auth) payload.auth = input.auth as SshAuth
+
+        const result = await send('agent-nexus/saveHost', payload as any)
         config.value = result.data.config
         status.value = result.data.status
         done(result.hostId)
-        const host = result.data.status.hosts.find((item) => item.id === result.hostId)
-        if (host?.error) ElMessage.warning(`设备已保存，连接失败：${host.error}`)
-        else ElMessage.success('设备已保存并完成扫描')
+        ElMessage.success(input.id ? '设备已保存，正在连接扫描…' : '设备已添加，正在连接扫描…')
+
+        // Background connect/scan finishes after save returns; refresh status shortly.
+        window.setTimeout(() => {
+            void reloadQuiet()
+        }, 1500)
+        window.setTimeout(() => {
+            void reloadQuiet()
+        }, 5000)
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
     } finally {
         connecting.value = false
+    }
+}
+
+async function reloadQuiet() {
+    try {
+        const data = await send('agent-nexus/getConsoleData')
+        config.value = data.config
+        status.value = data.status
+    } catch {
+        // ignore background refresh errors
     }
 }
 
@@ -251,7 +286,11 @@ async function refreshSkills(hostId?: string) {
         const items = await send('agent-nexus/listSkills', hostId)
         status.value = {
             ...status.value,
-            skills: { total: items.length, items }
+            skills: {
+                total: items.length,
+                items,
+                hostId: hostId || status.value.defaultHostId
+            }
         }
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))

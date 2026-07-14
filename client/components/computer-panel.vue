@@ -4,7 +4,8 @@
             <div>
                 <div class="panel-title">SSH Computer</div>
                 <div class="panel-description">
-                    管理远端机器，AgentNexus 会分别发现每台设备可用的 Code Agent。
+                    管理远端机器。多台设备时，命令请写：
+                    <code>nexus.hermes 设备名 任务</code>
                 </div>
             </div>
             <div class="panel-actions">
@@ -19,7 +20,9 @@
             <div v-if="creating" class="device-bar new-device-bar">
                 <div>
                     <div class="field-label">正在添加新设备</div>
-                    <div class="new-device-copy">填写连接信息后保存，不会覆盖已有设备。</div>
+                    <div class="new-device-copy">
+                        只有此模式会创建新设备。编辑已有设备请先从下拉列表选中，再点“保存当前设备并连接”。
+                    </div>
                 </div>
                 <el-button size="small" @click="cancelAdd">取消</el-button>
             </div>
@@ -34,12 +37,24 @@
                     />
                 </el-select>
                 <el-tag v-if="isDefaultHost" size="small" effect="plain">默认</el-tag>
+                <el-tag
+                    v-if="hostStatus?.error"
+                    size="small"
+                    effect="plain"
+                    type="danger"
+                >
+                    连接异常
+                </el-tag>
             </div>
 
             <div class="connection-grid">
                 <div class="field name-field">
                     <div class="field-label">设备名称</div>
-                    <el-input v-model="name" placeholder="例如 hermes、build-server" clearable />
+                    <el-input
+                        v-model="name"
+                        placeholder="例如 build、开发机（多机命令前缀）"
+                        clearable
+                    />
                 </div>
                 <div class="field host-field">
                     <div class="field-label">主机地址</div>
@@ -54,20 +69,61 @@
                     <el-input v-model="username" placeholder="root" clearable />
                 </div>
                 <div class="field">
+                    <div class="field-label">认证方式</div>
+                    <el-radio-group v-model="authType" class="auth-type">
+                        <el-radio-button label="password">密码</el-radio-button>
+                        <el-radio-button label="key">私钥</el-radio-button>
+                    </el-radio-group>
+                </div>
+                <div v-if="authType === 'password'" class="field">
                     <div class="field-label">密码</div>
                     <el-input
                         v-model="password"
                         type="password"
                         show-password
-                        :placeholder="hasSavedHost ? '留空保持原密码' : 'SSH 密码'"
+                        :placeholder="hasSavedHost ? '留空保持原密码，支持 env:VAR' : 'SSH 密码或 env:VAR'"
                         @keyup.enter="connect"
                     />
                 </div>
+                <template v-else>
+                    <div class="field key-field">
+                        <div class="field-label">私钥</div>
+                        <el-input
+                            v-model="privateKey"
+                            type="textarea"
+                            :rows="3"
+                            :placeholder="hasSavedHost ? '留空保持原私钥，或 env:SSH_KEY' : 'PEM 内容或 env:SSH_KEY'"
+                        />
+                    </div>
+                    <div class="field">
+                        <div class="field-label">Passphrase</div>
+                        <el-input
+                            v-model="passphrase"
+                            type="password"
+                            show-password
+                            :placeholder="hasSavedHost ? '留空保持原 Passphrase' : '可选'"
+                        />
+                    </div>
+                </template>
+                <div class="field">
+                    <div class="field-label">工作目录</div>
+                    <el-input v-model="cwd" placeholder="可选，如 ~/projects" clearable />
+                </div>
+                <div class="field switch-field">
+                    <div class="field-label">设为默认设备</div>
+                    <el-switch v-model="asDefault" />
+                </div>
+            </div>
+
+            <div v-if="hostStatus?.error" class="host-error-banner">
+                {{ hostStatus.error }}
             </div>
 
             <div class="connection-footer">
                 <div class="connection-copy">
-                    Code Agent 默认以非交互最高权限运行，并跳过确认与沙箱限制。
+                    设备名称会用于命令路由：
+                    <code>nexus.hermes {{ nameHint }} 修 bug</code>
+                    。Code Agent 默认非交互高权限运行。
                 </div>
                 <div class="connection-actions">
                     <el-button
@@ -80,7 +136,7 @@
                         删除设备
                     </el-button>
                     <el-button type="primary" :loading="connecting" @click="connect">
-                        {{ creating ? '添加、连接并扫描' : '保存、连接并扫描' }}
+                        {{ creating ? '添加设备并连接' : '保存当前设备并连接' }}
                     </el-button>
                 </div>
             </div>
@@ -126,7 +182,18 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { AgentKind, NexusConfig, NexusStatus, SshHostConfig } from '../../src/types'
+import type { AgentKind, NexusConfig, NexusStatus, SshAuth, SshHostConfig } from '../../src/types'
+
+export type ComputerConnectInput = {
+    id?: string
+    name: string
+    host: string
+    port: number
+    username: string
+    auth?: SshAuth
+    cwd?: string
+    setAsDefault?: boolean
+}
 
 const props = defineProps<{
     config: NexusConfig
@@ -135,10 +202,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-    connect: [
-        input: { id?: string; name: string; host: string; port: number; username: string; password: string },
-        done: (hostId: string) => void
-    ]
+    connect: [input: ComputerConnectInput, done: (hostId: string) => void]
     remove: [hostId: string]
 }>()
 
@@ -155,6 +219,11 @@ const host = ref('')
 const port = ref(22)
 const username = ref('root')
 const password = ref('')
+const privateKey = ref('')
+const passphrase = ref('')
+const cwd = ref('')
+const authType = ref<'password' | 'key'>('password')
+const asDefault = ref(false)
 const selectedHostId = ref('')
 const creating = ref(false)
 
@@ -182,7 +251,12 @@ watch(
         host.value = value?.host || ''
         port.value = value?.port || 22
         username.value = value?.username || 'root'
+        cwd.value = value?.cwd || ''
+        authType.value = value?.auth?.type === 'key' ? 'key' : 'password'
         password.value = ''
+        privateKey.value = ''
+        passphrase.value = ''
+        asDefault.value = !!id && id === props.config.defaultHostId
     },
     { immediate: true }
 )
@@ -195,16 +269,20 @@ const hostStatus = computed(() =>
     props.status.hosts.find((item) => item.id === selectedHostId.value)
 )
 const availableCount = computed(() => kinds.filter((kind) => agent(kind)?.installed).length)
-const connected = computed(() => !!hostStatus.value?.sessionCount || availableCount.value > 0)
+const connected = computed(() => hostStatus.value?.state === 'connected')
+const nameHint = computed(() => name.value.trim() || '设备名')
 const statusLabel = computed(() => {
     if (props.connecting) return '连接中'
-    if (connected.value) return '已连接'
+    if (hostStatus.value?.state === 'connecting') return '连接中'
+    if (hostStatus.value?.state === 'connected') return '已连接'
+    if (hostStatus.value?.state === 'error') return '连接失败'
     if (hasSavedHost.value) return '已保存'
     return '未连接'
 })
 const statusTagType = computed(() => {
-    if (props.connecting) return 'warning'
-    if (connected.value) return 'success'
+    if (props.connecting || hostStatus.value?.state === 'connecting') return 'warning'
+    if (hostStatus.value?.state === 'connected') return 'success'
+    if (hostStatus.value?.state === 'error') return 'danger'
     return 'info'
 })
 
@@ -224,6 +302,11 @@ function addComputer() {
     port.value = 22
     username.value = 'root'
     password.value = ''
+    privateKey.value = ''
+    passphrase.value = ''
+    cwd.value = ''
+    authType.value = 'password'
+    asDefault.value = props.config.hosts.length === 0
 }
 
 function cancelAdd() {
@@ -235,23 +318,76 @@ function cancelAdd() {
 }
 
 function connect() {
-    if (!name.value.trim() || !host.value.trim() || !username.value.trim()) {
+    const deviceName = name.value.trim()
+    if (!deviceName || !host.value.trim() || !username.value.trim()) {
         ElMessage.warning('请填写设备名称、主机地址和账号')
         return
     }
+
+    // Editing requires an existing selection. New devices only via "添加设备".
+    const editingId = creating.value ? '' : selectedHostId.value
+    if (!creating.value && !editingId) {
+        ElMessage.warning('请先选择已有设备，或点击右上角“添加设备”')
+        return
+    }
+
+    const duplicate = props.config.hosts.some(
+        (item) =>
+            item.id !== (editingId || undefined) &&
+            item.name.trim().toLowerCase() === deviceName.toLowerCase()
+    )
+    if (duplicate) {
+        ElMessage.warning(
+            creating.value
+                ? `设备名称“${deviceName}”已存在。如需修改该设备，请先从列表选中它，不要用添加模式覆盖。`
+                : `设备名称“${deviceName}”已存在，请换一个唯一名称`
+        )
+        return
+    }
+
+    if (creating.value) {
+        if (authType.value === 'password' && !password.value) {
+            ElMessage.warning('请填写 SSH 密码')
+            return
+        }
+        if (authType.value === 'key' && !privateKey.value.trim()) {
+            ElMessage.warning('请填写 SSH 私钥或 env:VAR')
+            return
+        }
+    }
+
+    let auth: SshAuth | undefined
+    if (authType.value === 'password') {
+        if (password.value || creating.value) {
+            auth = { type: 'password', password: password.value }
+        }
+    } else if (privateKey.value.trim() || creating.value) {
+        auth = {
+            type: 'key',
+            privateKey: privateKey.value,
+            passphrase: passphrase.value || undefined
+        }
+    }
+
     emit(
         'connect',
         {
-            id: creating.value ? undefined : selectedHostId.value,
-            name: name.value.trim(),
+            // Only omit id in explicit create mode.
+            ...(creating.value ? {} : { id: editingId }),
+            name: deviceName,
             host: host.value.trim(),
             port: port.value || 22,
             username: username.value.trim(),
-            password: password.value
+            auth,
+            cwd: cwd.value.trim() || undefined,
+            setAsDefault: asDefault.value
         },
         (hostId) => {
             creating.value = false
             selectedHostId.value = hostId
+            password.value = ''
+            privateKey.value = ''
+            passphrase.value = ''
         }
     )
 }
@@ -302,7 +438,8 @@ function connect() {
 .scan-hint,
 .agent-version,
 .agent-path,
-.section-meta {
+.section-meta,
+.new-device-copy {
     font-size: 13px;
     line-height: 1.55;
     color: var(--k-text-light);
@@ -311,6 +448,16 @@ function connect() {
 .panel-description,
 .section-description {
     margin-top: 5px;
+}
+
+.panel-description code,
+.connection-copy code {
+    padding: 1px 6px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--k-page-bg), transparent 10%);
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+    color: var(--k-text-dark);
 }
 
 .connection-card,
@@ -342,12 +489,6 @@ function connect() {
     justify-content: space-between;
 }
 
-.new-device-copy {
-    margin-top: 4px;
-    color: var(--k-text-light);
-    font-size: 12px;
-}
-
 .device-select {
     width: min(100%, 480px);
 }
@@ -363,8 +504,29 @@ function connect() {
     color: var(--k-text-dark);
 }
 
-.port-field :deep(.el-input-number) {
+.port-field :deep(.el-input-number),
+.auth-type {
     width: 100%;
+}
+
+.key-field {
+    grid-column: span 2;
+}
+
+.switch-field {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.host-error-banner {
+    margin: 0 20px 14px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--el-color-danger-light-9), transparent 10%);
+    color: var(--el-color-danger);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 .connection-footer {
@@ -450,7 +612,8 @@ function connect() {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .name-field {
+    .name-field,
+    .key-field {
         grid-column: 1 / -1;
     }
 }

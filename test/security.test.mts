@@ -16,7 +16,9 @@ import { extractPaths, parseJsonLines } from '../src/adapters/base.ts'
 import { syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
+    assertUniqueHostName,
     mergeHostSecrets,
+    patchHostConfig,
     redactNexusConfig,
     repairHostIds,
     resolveHostReference,
@@ -26,6 +28,7 @@ import { createId } from '../client/utils/id.ts'
 import { splitMessage } from '../src/utils/text.ts'
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
+import { terminalMessageSize } from '../src/proxy.ts'
 
 test('creates UUIDs without crypto.randomUUID for LAN HTTP consoles', () => {
     const id = createId({
@@ -255,6 +258,67 @@ test('keeps stored secrets when an edited host submits blank credentials', () =>
     assert.deepEqual(mergeHostSecrets(incoming, previous).auth, previous.auth)
 })
 
+test('keeps previous auth when password host is edited without auth field', () => {
+    const previous = {
+        id: 'host',
+        name: 'build',
+        host: '10.1.2.10',
+        port: 22,
+        username: 'root',
+        auth: { type: 'password' as const, password: 'secret' },
+        enabled: true,
+        defaultAgent: 'claude' as const,
+        idleTimeoutMs: 30_000,
+        cwd: '~/work'
+    }
+    const patched = patchHostConfig(previous, {
+        name: 'build',
+        host: '10.1.2.11',
+        port: 22,
+        username: 'root'
+    })
+    assert.deepEqual(patched.auth, previous.auth)
+    assert.equal(patched.defaultAgent, 'claude')
+    assert.equal(patched.idleTimeoutMs, 30_000)
+    assert.equal(patched.cwd, '~/work')
+    assert.equal(patched.host, '10.1.2.11')
+})
+
+test('does not convert key host to empty password auth', () => {
+    const previous = {
+        id: 'host',
+        name: 'build',
+        host: '10.1.2.10',
+        port: 22,
+        username: 'root',
+        auth: { type: 'key' as const, privateKey: 'private-key' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }
+    const patched = patchHostConfig(previous, {
+        auth: { type: 'password', password: '' }
+    })
+    assert.equal(patched.auth.type, 'key')
+    assert.equal(patched.auth.type === 'key' && patched.auth.privateKey, 'private-key')
+})
+
+test('rejects duplicate device names', () => {
+    const hosts = [
+        {
+            id: 'a',
+            name: 'build',
+            host: '10.1.2.1',
+            port: 22,
+            username: 'root',
+            auth: { type: 'password' as const, password: 'x' },
+            enabled: true,
+            idleTimeoutMs: 1000
+        }
+    ]
+    assert.throws(() => assertUniqueHostName(hosts, 'Build'), /已存在/)
+    assert.equal(assertUniqueHostName(hosts, 'dev'), 'dev')
+})
+
 test('resolves SSH hosts by ID, address, name, and connection target', () => {
     const hosts = [
         {
@@ -288,7 +352,7 @@ test('rejects ambiguous SSH host addresses', () => {
         enabled: true,
         idleTimeoutMs: 1000
     }))
-    assert.throws(() => resolveHostReference(hosts, '10.1.2.50'), /ambiguous/)
+    assert.throws(() => resolveHostReference(hosts, '10.1.2.50'), /歧义/)
 })
 
 test('repairs missing and duplicate SSH host IDs', () => {
@@ -345,6 +409,27 @@ test('routes multi-host commands by leading device name', () => {
     assert.throws(() => routeCommandHost(hosts, '查看 Linux 版本'), /hermes、claude/)
 })
 
+test('routes multi-host commands by longest device name prefix', () => {
+    const hosts = ['build', 'build-server'].map((name, index) => ({
+        id: `host-${index}`,
+        name,
+        host: `10.1.2.${40 + index}`,
+        port: 22,
+        username: 'lumia',
+        auth: { type: 'password' as const, password: 'secret' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }))
+    assert.deepEqual(routeCommandHost(hosts, 'build-server 检查版本'), {
+        hostId: 'host-1',
+        prompt: '检查版本'
+    })
+    assert.deepEqual(routeCommandHost(hosts, 'build 修 bug'), {
+        hostId: 'host-0',
+        prompt: '修 bug'
+    })
+})
+
 function sshSession(maxOutputBytes = 1024) {
     const session = new SshSession({
         id: 'host',
@@ -399,9 +484,54 @@ test('limits captured SSH output', async () => {
     assert.equal(result.truncated, true)
 })
 
+test('times out SSH shell creation and closes a late channel', async () => {
+    const session = sshSession()
+    let closed = false
+    ;(session as any).client = {
+        shell(_options: unknown, callback: (err: Error | undefined, channel: any) => void) {
+            setTimeout(() => {
+                const channel = new EventEmitter() as any
+                channel.close = () => { closed = true }
+                callback(undefined, channel)
+            }, 20)
+        }
+    }
+    await assert.rejects(
+        session.createTerminal({ timeoutMs: 5 }),
+        /channel creation timed out/
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(closed, true)
+    assert.equal(session.hasActiveOperations(), false)
+})
+
+test('keeps an SSH session active until its terminal closes', async () => {
+    const session = sshSession()
+    const channel = new EventEmitter() as any
+    channel.write = () => undefined
+    channel.close = () => channel.emit('close')
+    channel.setWindow = () => undefined
+    ;(session as any).client = {
+        shell(_options: unknown, callback: (err: Error | undefined, channel: any) => void) {
+            callback(undefined, channel)
+        }
+    }
+
+    const terminal = await session.createTerminal()
+    assert.equal(session.hasActiveOperations(), true)
+    terminal.kill()
+    assert.equal(session.hasActiveOperations(), false)
+})
+
+test('measures terminal WebSocket messages before parsing', () => {
+    assert.equal(terminalMessageSize(Buffer.alloc(12)), 12)
+    assert.equal(terminalMessageSize([Buffer.alloc(5), Buffer.alloc(7)]), 12)
+    assert.equal(terminalMessageSize('你好'), 6)
+})
+
 test('shares an in-flight SFTP initialization', async () => {
     const session = sshSession()
-    const wrapper = {} as any
+    const wrapper = new EventEmitter() as any
     let calls = 0
     ;(session as any).client = {
         sftp(callback: (err: Error | undefined, sftp: any) => void) {

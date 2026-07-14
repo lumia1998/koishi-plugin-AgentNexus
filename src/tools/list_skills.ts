@@ -7,7 +7,10 @@ export class NexusListSkillsTool extends NexusToolBase {
     description = 'List skills synced by AgentNexus on the remote host.'
 
     schema = z.object({
-        hostId: z.string().optional(),
+        hostId: z
+            .string()
+            .optional()
+            .describe('SSH host id, device name, or address. Defaults to default host.'),
         refresh: z.boolean().optional()
     })
 
@@ -15,7 +18,7 @@ export class NexusListSkillsTool extends NexusToolBase {
         try {
             const skills = input.refresh
                 ? await this.nexus.refreshSkills(input.hostId)
-                : this.nexus.getStatus().skills.items
+                : this.nexus.getSkillsForHost(input.hostId)
 
             if (!skills.length) return 'No skills found.'
             return skills

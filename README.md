@@ -55,6 +55,15 @@ nexus.codex <任务>
 nexus.cancel
 ```
 
+只配置一台设备时，直接写任务即可。配置多台设备时，在任务前加上 **Computer
+页面里的设备名称**：
+
+```text
+nexus.hermes build 修登录页 bug
+nexus.hermes 开发机 检查版本
+nexus.claudecode build-server 跑测试
+```
+
 `nexus.claude` 是 `nexus.claudecode` 的别名。命令会直接回复 Agent 的文本输出，
 并自动通过 SFTP 发布和发送 Agent 声明的图片或其他文件。
 
@@ -63,16 +72,17 @@ nexus.cancel
 命令支持以下选项：
 
 ```text
--H <host>       SSH 主机 ID
+-H <host>       设备名称、地址或 ID（可选；多机时更推荐写「名称 任务」）
 -C <cwd>        远端工作目录
 -m <model>      模型名称
 -t <seconds>    超时时间（秒）
 -a <name>       OpenClaw Agent 名称
 ```
 
-SSH 配置保存后，插件会自动维持默认连接，并每 30 秒检查一次断线状态。
+SSH 配置保存后，插件会维持所有已启用设备的连接，并每 30 秒检查断线状态。
 进入 **终端** 页面时会自动创建一个 SSH 终端。
-Console 不会回传已保存的密码；编辑已有连接时密码留空会继续使用原密码。
+Console 不会回传已保存的密码或私钥；编辑已有连接时对应字段留空会继续使用原凭据。
+设备名称必须唯一，因为它会用于多机命令路由。
 
 ## ChatLuna 工具
 

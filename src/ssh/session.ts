@@ -8,6 +8,7 @@ import { mimeType } from '../utils/mime'
 export interface TerminalHandle {
     id: string
     onData(cb: (data: string) => void): () => void
+    onClose(cb: () => void): () => void
     sendInput(data: string): void
     resize(cols: number, rows: number): void
     kill(): void
@@ -22,7 +23,10 @@ export class SshSession {
     private path = '/usr/local/bin:/usr/bin:/bin'
     private sftp?: SFTPWrapper
     private connecting?: Promise<void>
+    private cancelConnecting?: (error: Error) => void
     private sftpConnecting?: Promise<SFTPWrapper>
+    private activeOperations = 0
+    private connectionGeneration = 0
     lastError?: string
     lastConnectedAt?: number
     lastActiveAt = Date.now()
@@ -46,6 +50,10 @@ export class SshSession {
         return !!this.connecting
     }
 
+    hasActiveOperations() {
+        return this.activeOperations > 0
+    }
+
     touch() {
         this.lastActiveAt = Date.now()
     }
@@ -54,8 +62,15 @@ export class SshSession {
         if (this.connected) return
         if (this.connecting) return this.connecting
 
-        this.client = new Client()
-        this.connecting = new Promise<void>((resolve, reject) => {
+        const generation = ++this.connectionGeneration
+        const client = new Client()
+        this.client = client
+        const isCurrent = () =>
+            this.connectionGeneration === generation && this.client === client
+        let task: Promise<void>
+        task = new Promise<void>((resolve, reject) => {
+            const cancel = (error: Error) => reject(error)
+            this.cancelConnecting = cancel
             const auth = this.host.auth
             const config: Record<string, unknown> = {
                 host: this.host.host,
@@ -74,27 +89,39 @@ export class SshSession {
                 }
             }
 
-            this.client
+            client
                 .on('ready', () => {
+                    if (!isCurrent()) {
+                        client.end()
+                        return
+                    }
                     this.connected = true
                     this.lastError = undefined
                     this.lastConnectedAt = Date.now()
                     this.touch()
-                    this.rawExec(`bash -lc 'printf "%s\\n%s" "$HOME" "$PATH"'`, 10000)
+                    this.rawExec(
+                        `bash -lc 'printf "%s\\n%s" "$HOME" "$PATH"'`,
+                        10000,
+                        undefined,
+                        client
+                    )
                         .then((result) => {
+                            if (!isCurrent()) return reject(new Error('SSH connection superseded'))
                             const [home, path] = result.stdout.trim().split('\n')
                             this.home = home || '~'
                             this.path = path || this.path
                             resolve()
                         })
                         .catch((err) => {
+                            if (!isCurrent()) return reject(err)
                             this.connected = false
                             this.lastError = errorMessage(err)
-                            this.client.end()
+                            client.end()
                             reject(err)
                         })
                 })
                 .on('error', (err) => {
+                    if (!isCurrent()) return
                     this.connected = false
                     this.sftp = undefined
                     this.sftpConnecting = undefined
@@ -102,28 +129,36 @@ export class SshSession {
                     reject(err)
                 })
                 .on('end', () => {
+                    if (!isCurrent()) return
                     this.connected = false
                     this.sftp = undefined
                     this.sftpConnecting = undefined
                 })
                 .on('close', () => {
+                    if (!isCurrent()) return
                     this.connected = false
                     this.sftp = undefined
                     this.sftpConnecting = undefined
                 })
                 .connect(config as any)
         }).finally(() => {
-            this.connecting = undefined
+            if (this.connecting === task) this.connecting = undefined
+            this.cancelConnecting = undefined
         })
 
-        return this.connecting
+        this.connecting = task
+        return task
     }
 
     async disconnect(): Promise<void> {
+        const cancelConnecting = this.cancelConnecting
+        this.connectionGeneration += 1
+        const client = this.client
         this.connected = false
         this.sftp = undefined
         this.sftpConnecting = undefined
-        this.client.end()
+        client.end()
+        cancelConnecting?.(new Error('SSH connection closed'))
     }
 
     async exec(
@@ -151,14 +186,16 @@ export class SshSession {
                   .join(' ')
             : ''
         const wrapped = `export PATH=${shellPath(this.path)}; cd ${shellPath(cwd)} 2>/dev/null || cd; ${envPrefix}${command}`
-        return this.rawExec(wrapped, timeoutMs, options.signal)
+        return this.rawExec(wrapped, timeoutMs, options.signal, this.client)
     }
 
     private rawExec(
         command: string,
         timeoutMs: number,
-        abortSignal?: AbortSignal
+        abortSignal?: AbortSignal,
+        client = this.client
     ): Promise<ExecResult> {
+        this.activeOperations += 1
         return new Promise((resolve, reject) => {
             let stdout = ''
             let stderr = ''
@@ -183,6 +220,7 @@ export class SshSession {
             const finish = (code: number, signal?: string) => {
                 if (settled) return
                 settled = true
+                this.activeOperations -= 1
                 clearTimeout(timer)
                 abortSignal?.removeEventListener('abort', abort)
                 this.touch()
@@ -209,7 +247,7 @@ export class SshSession {
                 return current + chunk.toString('utf8')
             }
 
-            this.client.exec(command, (err, ch) => {
+            client.exec(command, (err, ch) => {
                 if (settled) {
                     try {
                         ch?.signal('KILL')
@@ -221,6 +259,7 @@ export class SshSession {
                     clearTimeout(timer)
                     abortSignal?.removeEventListener('abort', abort)
                     settled = true
+                    this.activeOperations -= 1
                     reject(err)
                     return
                 }
@@ -242,10 +281,21 @@ export class SshSession {
         await this.connect()
         if (this.sftp) return this.sftp
         if (this.sftpConnecting) return this.sftpConnecting
+        const client = this.client
         this.sftpConnecting = new Promise<SFTPWrapper>((resolve, reject) => {
-            this.client.sftp((err, sftp) => {
+            client.sftp((err, sftp) => {
                 if (err) return reject(err)
+                if (client !== this.client || !this.connected) {
+                    sftp.end()
+                    return reject(new Error('SSH connection changed during SFTP initialization'))
+                }
                 this.sftp = sftp
+                const clear = () => {
+                    if (this.sftp === sftp) this.sftp = undefined
+                }
+                sftp.once('close', clear)
+                sftp.once('end', clear)
+                sftp.once('error', clear)
                 resolve(sftp)
             })
         }).finally(() => {
@@ -302,6 +352,7 @@ export class SshSession {
         cols?: number
         rows?: number
         cwd?: string
+        timeoutMs?: number
     } = {}): Promise<TerminalHandle> {
         await this.connect()
         this.touch()
@@ -309,18 +360,45 @@ export class SshSession {
         const cols = options.cols ?? 120
         const rows = options.rows ?? 30
         const cwd = options.cwd || this.cwd
+        const timeoutMs = options.timeoutMs ?? 20_000
+        const client = this.client
 
         return new Promise((resolve, reject) => {
-            this.client.shell(
+            let settled = false
+            const timer = setTimeout(() => {
+                settled = true
+                reject(new Error('SSH shell channel creation timed out'))
+            }, timeoutMs)
+
+            client.shell(
                 { term: 'xterm-256color', cols, rows },
                 (err, stream) => {
+                    if (settled) {
+                        try {
+                            stream?.close()
+                        } catch {}
+                        return
+                    }
+                    settled = true
+                    clearTimeout(timer)
                     if (err) return reject(err)
 
                     const id = randomUUID()
                     const listeners = new Set<(data: string) => void>()
+                    const closeListeners = new Set<() => void>()
                     const touch = () => this.touch()
                     let pending = ''
                     let closed = false
+                    this.activeOperations += 1
+
+                    const markClosed = () => {
+                        if (closed) return
+                        closed = true
+                        this.activeOperations -= 1
+                        listeners.clear()
+                        for (const cb of closeListeners) cb()
+                        closeListeners.clear()
+                    }
 
                     stream.write(`export TERM=xterm-256color; cd ${shellPath(cwd)} 2>/dev/null || true\n`)
 
@@ -333,10 +411,8 @@ export class SshSession {
                         for (const cb of listeners) cb(text)
                     })
 
-                    stream.on('close', () => {
-                        closed = true
-                        listeners.clear()
-                    })
+                    stream.on('close', markClosed)
+                    stream.on('error', markClosed)
 
                     resolve({
                         id,
@@ -347,6 +423,14 @@ export class SshSession {
                                 pending = ''
                             }
                             return () => listeners.delete(cb)
+                        },
+                        onClose(cb) {
+                            if (closed) {
+                                queueMicrotask(cb)
+                                return () => undefined
+                            }
+                            closeListeners.add(cb)
+                            return () => closeListeners.delete(cb)
                         },
                         sendInput(data) {
                             if (!closed) {
@@ -359,7 +443,7 @@ export class SshSession {
                         },
                         kill() {
                             if (!closed) {
-                                closed = true
+                                markClosed()
                                 stream.close()
                             }
                         }

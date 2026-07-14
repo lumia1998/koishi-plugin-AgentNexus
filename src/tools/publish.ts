@@ -9,7 +9,10 @@ Use after nexus_delegate when the agent produced images/files and publishFiles w
 
     schema = z.object({
         paths: z.array(z.string()).min(1).describe('Remote absolute file paths'),
-        hostId: z.string().optional().describe('SSH host id')
+        hostId: z
+            .string()
+            .optional()
+            .describe('SSH host id, device name, or address')
     })
 
     async _call(input: { paths: string[]; hostId?: string }) {

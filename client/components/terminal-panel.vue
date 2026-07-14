@@ -88,7 +88,7 @@
                         </div>
                     </div>
                     <div v-if="!tabs.length" class="terminal-empty">
-                        正在打开终端…
+                        选择主机后点击右上角 + 打开终端
                     </div>
                 </div>
             </div>
@@ -114,6 +114,7 @@ interface TerminalTab {
     connecting: boolean
     connected: boolean
     error: string
+    cancelled: boolean
 }
 
 interface TerminalRuntime {
@@ -181,12 +182,10 @@ watch(activeKey, async (key) => {
     syncTabSize(key)
 })
 
-onMounted(async () => {
+onMounted(() => {
     disposed = false
     createHostId.value = pickDefaultHostId()
-    if (createHostId.value) {
-        await createTab(createHostId.value)
-    }
+    // Match ChatLuna computer terminal: open only when user clicks +.
 })
 
 onBeforeUnmount(async () => {
@@ -196,10 +195,14 @@ onBeforeUnmount(async () => {
 
 async function createTab(hostId?: string) {
     if (creating.value || disposed) return
+    if (!hosts.value.length) {
+        ElMessage.warning('请先在 Computer 页面添加并保存 SSH 设备')
+        return
+    }
     const targetHostId = hostId || createHostId.value || pickDefaultHostId()
     const host = hosts.value.find((item) => item.id === targetHostId)
-    if (!host) {
-        ElMessage.warning('请先配置 SSH 主机')
+    if (!host?.id) {
+        ElMessage.warning('请先选择要打开终端的设备')
         return
     }
 
@@ -214,7 +217,8 @@ async function createTab(hostId?: string) {
         terminalId: '',
         connecting: true,
         connected: false,
-        error: ''
+        error: '',
+        cancelled: false
     }
     tabs.value.push(tab)
     activeKey.value = key
@@ -222,23 +226,44 @@ async function createTab(hostId?: string) {
     try {
         const runtime = await ensureRuntime(
             tab,
-            `Connecting ${host.username}@${host.host}:${host.port || 22}...\r\n`
+            `Opening ${host.name} (${host.username}@${host.host}:${host.port || 22})...\r\n`
         )
         let openTimer: ReturnType<typeof setTimeout> | undefined
+        let openTimedOut = false
+        const openPromise = send('agent-nexus/openTerminal', {
+            hostId: host.id,
+            cols: runtime.term.cols,
+            rows: runtime.term.rows
+        }) as Promise<TerminalInfo>
+        void openPromise
+            .then((lateInfo) => {
+                if (openTimedOut || disposed || tab.cancelled) {
+                    void send(
+                        'agent-nexus/closeTerminal',
+                        lateInfo.sessionId,
+                        lateInfo.terminalId
+                    ).catch(() => undefined)
+                }
+            })
+            .catch(() => undefined)
         const info = (await Promise.race([
-            send('agent-nexus/openTerminal', {
-                hostId: host.id,
-                cols: runtime.term.cols,
-                rows: runtime.term.rows
-            }),
+            openPromise,
             new Promise<never>((_, reject) => {
                 openTimer = setTimeout(
-                    () => reject(new Error('SSH 终端创建超时，请检查设备连接和认证信息。')),
+                    () => {
+                        openTimedOut = true
+                        reject(new Error('SSH 终端创建超时，请检查设备连接和认证信息。'))
+                    },
                     25_000
                 )
             })
         ]).finally(() => clearTimeout(openTimer))) as TerminalInfo
-        if (disposed) return
+        if (disposed || tab.cancelled || !tabs.value.some((item) => item.key === key)) {
+            void send('agent-nexus/closeTerminal', info.sessionId, info.terminalId).catch(
+                () => undefined
+            )
+            return
+        }
         tab.sessionId = info.sessionId
         tab.terminalId = info.terminalId
         await connectSocket(tab, runtime, info)
@@ -246,10 +271,12 @@ async function createTab(hostId?: string) {
         tab.connected = true
         tab.error = ''
     } catch (err: any) {
+        const message = String(err?.message || err).split('\n')[0]
         tab.connecting = false
         tab.connected = false
-        tab.error = String(err?.message || err).split('\n')[0]
-        runtimeMap.get(key)?.term.write(`\r\n[error] ${tab.error}\r\n`)
+        tab.error = message
+        runtimeMap.get(key)?.term.write(`\r\n[error] ${message}\r\n`)
+        ElMessage.error(message || '打开终端失败')
     } finally {
         creating.value = false
     }
@@ -368,12 +395,9 @@ async function connectSocket(
 async function closeTab(key: string, remote = true) {
     const tab = tabs.value.find((item) => item.key === key)
     if (!tab) return
-
-    if (remote && tab.sessionId && tab.terminalId) {
-        try {
-            await send('agent-nexus/closeTerminal', tab.sessionId, tab.terminalId)
-        } catch {}
-    }
+    tab.cancelled = true
+    const sessionId = tab.sessionId
+    const terminalId = tab.terminalId
 
     const runtime = runtimeMap.get(key)
     runtime?.observer?.disconnect()
@@ -387,6 +411,10 @@ async function closeTab(key: string, remote = true) {
     if (activeKey.value === key) {
         const next = tabs.value[idx] ?? tabs.value[idx - 1]
         activeKey.value = next?.key ?? ''
+    }
+
+    if (remote && sessionId && terminalId) {
+        void send('agent-nexus/closeTerminal', sessionId, terminalId).catch(() => undefined)
     }
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
   "description": "SSH-backed code agent gateway for ChatLuna (Hermes / OpenClaw / Claude Code / OpenCode / Codex)",
-  "version": "0.1.18",
+    "version": "0.1.19",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -66,7 +66,7 @@
     "@koishijs/client": "^5.29.0",
     "@langchain/core": "^0.3.40",
     "@xterm/addon-fit": "^0.10.0",
-    "element-plus": "^2.7.7",
+    "element-plus": "^2.14.3",
     "ssh2": "^1.16.0",
     "xterm": "^5.3.0",
     "zod": "^3.23.0"

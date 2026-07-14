@@ -16,7 +16,12 @@ The remote agent runs non-interactively. Produced files can be auto-published.`
             .enum(['auto', 'hermes', 'openclaw', 'claude', 'opencode', 'codex'])
             .optional()
             .describe('Target code agent. Defaults to host/auto selection.'),
-        hostId: z.string().optional().describe('SSH host id. Defaults to configured default host.'),
+        hostId: z
+            .string()
+            .optional()
+            .describe(
+                'SSH host id, device name, or address (user@host). Defaults to configured default host.'
+            ),
         cwd: z.string().optional().describe('Remote working directory'),
         model: z.string().optional().describe('Optional model override'),
         timeoutMs: z.number().optional().describe('Timeout in milliseconds'),
