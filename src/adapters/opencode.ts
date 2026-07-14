@@ -1,4 +1,4 @@
-import { CodeAgentAdapter, type DelegateOptions } from './base'
+import { CodeAgentAdapter, parseJsonLines, type DelegateOptions } from './base'
 import { quoteShell } from '../utils/shell'
 
 export class OpenCodeAdapter extends CodeAgentAdapter {
@@ -15,9 +15,13 @@ export class OpenCodeAdapter extends CodeAgentAdapter {
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
         const parts = ['opencode', 'run', '--format', 'json']
-        parts.push('--auto')
+        if (options.runtime.opencodeAuto) parts.push('--auto')
         if (options.model) parts.push('-m', quoteShell(options.model))
         parts.push(promptExpr)
         return parts.join(' ')
+    }
+
+    protected parseText(stdout: string, stderr: string) {
+        return parseJsonLines(stdout) || stdout.trim() || stderr.trim()
     }
 }

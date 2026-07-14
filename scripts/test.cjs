@@ -15,11 +15,16 @@ try {
         platform: 'node',
         target: 'node18',
         format: 'cjs',
+        external: ['ssh2'],
         outfile
     })
     const result = spawnSync(process.execPath, ['--test', outfile], {
         cwd: root,
-        stdio: 'inherit'
+        stdio: 'inherit',
+        env: {
+            ...process.env,
+            NODE_PATH: path.join(root, 'node_modules')
+        }
     })
     process.exitCode = result.status ?? 1
 } finally {

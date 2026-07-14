@@ -12,6 +12,12 @@ export const name = 'agent-nexus'
 export interface Config {
     defaultTimeoutMs: number
     skillRoot: string
+    commandAuthority: number
+    maxConcurrentPerHost: number
+    maxConcurrentPerUser: number
+    maxOutputBytes: number
+    commandUsers: string[]
+    commandChannels: string[]
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -20,7 +26,33 @@ export const Config: Schema<Config> = Schema.object({
         .description('委托执行默认超时（毫秒）'),
     skillRoot: Schema.string()
         .default('~/.agent-nexus/skills')
-        .description('远端 skills 中心目录（相对远端 home 时用 ~）')
+        .description('远端 skills 中心目录（相对远端 home 时用 ~）'),
+    commandAuthority: Schema.number()
+        .min(1)
+        .max(5)
+        .default(4)
+        .description('直接调用 nexus.* 命令所需权限等级'),
+    maxConcurrentPerHost: Schema.number()
+        .min(1)
+        .max(16)
+        .default(2)
+        .description('每台 SSH 主机允许同时执行的 Agent 任务数'),
+    maxConcurrentPerUser: Schema.number()
+        .min(1)
+        .max(8)
+        .default(1)
+        .description('每个用户允许同时执行的直接命令数'),
+    maxOutputBytes: Schema.number()
+        .min(65536)
+        .max(67108864)
+        .default(4194304)
+        .description('单次 SSH 命令 stdout/stderr 最大捕获字节数'),
+    commandUsers: Schema.array(String)
+        .default([])
+        .description('允许调用 nexus.* 的用户 ID 白名单；留空表示只检查权限等级'),
+    commandChannels: Schema.array(String)
+        .default([])
+        .description('允许调用 nexus.* 的频道 ID 白名单；留空表示不限制频道')
 })
 
 export function createDefaultNexusConfig(cfg?: Config): NexusConfig {

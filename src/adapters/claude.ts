@@ -21,7 +21,9 @@ export class ClaudeAdapter extends CodeAgentAdapter {
         if (options.model) {
             parts.push('--model', quoteShell(options.model))
         }
-        parts.push('--dangerously-skip-permissions')
+        if (options.runtime.claudeSkipPermissions) {
+            parts.push('--dangerously-skip-permissions')
+        }
         return parts.join(' ')
     }
 }

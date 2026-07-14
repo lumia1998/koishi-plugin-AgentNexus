@@ -4,16 +4,43 @@
             <div>
                 <div class="panel-title">SSH Computer</div>
                 <div class="panel-description">
-                    连接一台远端机器，AgentNexus 会自动发现可用的 Code Agent。
+                    管理远端机器，AgentNexus 会分别发现每台设备可用的 Code Agent。
                 </div>
             </div>
-            <el-tag size="small" effect="plain" :type="statusTagType">
-                {{ statusLabel }}
-            </el-tag>
+            <div class="panel-actions">
+                <el-tag size="small" effect="plain" :type="statusTagType">
+                    {{ statusLabel }}
+                </el-tag>
+                <el-button size="small" @click="addComputer">添加设备</el-button>
+            </div>
         </div>
 
         <section class="connection-card">
+            <div v-if="creating" class="device-bar new-device-bar">
+                <div>
+                    <div class="field-label">正在添加新设备</div>
+                    <div class="new-device-copy">填写连接信息后保存，不会覆盖已有设备。</div>
+                </div>
+                <el-button size="small" @click="cancelAdd">取消</el-button>
+            </div>
+            <div v-else-if="config.hosts.length" class="device-bar">
+                <div class="field-label">当前设备</div>
+                <el-select v-model="selectedHostId" class="device-select">
+                    <el-option
+                        v-for="item in config.hosts"
+                        :key="item.id"
+                        :label="hostLabel(item)"
+                        :value="item.id"
+                    />
+                </el-select>
+                <el-tag v-if="isDefaultHost" size="small" effect="plain">默认</el-tag>
+            </div>
+
             <div class="connection-grid">
+                <div class="field name-field">
+                    <div class="field-label">设备名称</div>
+                    <el-input v-model="name" placeholder="例如 hermes、build-server" clearable />
+                </div>
                 <div class="field host-field">
                     <div class="field-label">主机地址</div>
                     <el-input v-model="host" placeholder="192.168.1.10" clearable />
@@ -42,9 +69,20 @@
                 <div class="connection-copy">
                     Code Agent 默认以非交互最高权限运行，并跳过确认与沙箱限制。
                 </div>
-                <el-button type="primary" :loading="connecting" @click="connect">
-                    {{ connected ? '重新连接并扫描' : '连接并扫描' }}
-                </el-button>
+                <div class="connection-actions">
+                    <el-button
+                        v-if="!creating && selectedHostId"
+                        type="danger"
+                        plain
+                        :disabled="connecting"
+                        @click="$emit('remove', selectedHostId)"
+                    >
+                        删除设备
+                    </el-button>
+                    <el-button type="primary" :loading="connecting" @click="connect">
+                        {{ creating ? '添加、连接并扫描' : '保存、连接并扫描' }}
+                    </el-button>
+                </div>
             </div>
         </section>
 
@@ -88,7 +126,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { AgentKind, NexusConfig, NexusStatus } from '../../src/types'
+import type { AgentKind, NexusConfig, NexusStatus, SshHostConfig } from '../../src/types'
 
 const props = defineProps<{
     config: NexusConfig
@@ -97,7 +135,11 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-    connect: [input: { host: string; port: number; username: string; password: string }]
+    connect: [
+        input: { id?: string; name: string; host: string; port: number; username: string; password: string },
+        done: (hostId: string) => void
+    ]
+    remove: [hostId: string]
 }>()
 
 const kinds: AgentKind[] = ['hermes', 'openclaw', 'claude', 'opencode', 'codex']
@@ -108,14 +150,35 @@ const labels: Record<AgentKind, string> = {
     opencode: 'OpenCode',
     codex: 'Codex'
 }
+const name = ref('')
 const host = ref('')
 const port = ref(22)
 const username = ref('root')
 const password = ref('')
+const selectedHostId = ref('')
+const creating = ref(false)
 
 watch(
-    () => props.config.hosts[0],
-    (value) => {
+    () => props.config.hosts,
+    (hosts) => {
+        if (creating.value) return
+        if (selectedHostId.value && hosts.some((item) => item.id === selectedHostId.value)) {
+            return
+        }
+        selectedHostId.value =
+            hosts.find((item) => item.id === props.config.defaultHostId)?.id ||
+            hosts[0]?.id ||
+            ''
+    },
+    { immediate: true, deep: true }
+)
+
+watch(
+    selectedHostId,
+    (id) => {
+        if (creating.value) return
+        const value = props.config.hosts.find((item) => item.id === id)
+        name.value = value?.name || ''
         host.value = value?.host || ''
         port.value = value?.port || 22
         username.value = value?.username || 'root'
@@ -124,8 +187,13 @@ watch(
     { immediate: true }
 )
 
-const hasSavedHost = computed(() => !!props.config.hosts[0])
-const hostStatus = computed(() => props.status.hosts[0])
+const hasSavedHost = computed(() =>
+    !creating.value && props.config.hosts.some((item) => item.id === selectedHostId.value)
+)
+const isDefaultHost = computed(() => selectedHostId.value === props.config.defaultHostId)
+const hostStatus = computed(() =>
+    props.status.hosts.find((item) => item.id === selectedHostId.value)
+)
 const availableCount = computed(() => kinds.filter((kind) => agent(kind)?.installed).length)
 const connected = computed(() => !!hostStatus.value?.sessionCount || availableCount.value > 0)
 const statusLabel = computed(() => {
@@ -144,17 +212,48 @@ function agent(kind: AgentKind) {
     return hostStatus.value?.agents.find((item) => item.kind === kind)
 }
 
+function hostLabel(item: SshHostConfig) {
+    const suffix = item.id === props.config.defaultHostId ? ' · 默认' : ''
+    return `${item.name || item.host} (${item.username}@${item.host}:${item.port || 22})${suffix}`
+}
+
+function addComputer() {
+    creating.value = true
+    name.value = ''
+    host.value = ''
+    port.value = 22
+    username.value = 'root'
+    password.value = ''
+}
+
+function cancelAdd() {
+    creating.value = false
+    selectedHostId.value =
+        props.config.hosts.find((item) => item.id === props.config.defaultHostId)?.id ||
+        props.config.hosts[0]?.id ||
+        ''
+}
+
 function connect() {
-    if (!host.value.trim() || !username.value.trim()) {
-        ElMessage.warning('请填写主机地址和账号')
+    if (!name.value.trim() || !host.value.trim() || !username.value.trim()) {
+        ElMessage.warning('请填写设备名称、主机地址和账号')
         return
     }
-    emit('connect', {
-        host: host.value.trim(),
-        port: port.value || 22,
-        username: username.value.trim(),
-        password: password.value
-    })
+    emit(
+        'connect',
+        {
+            id: creating.value ? undefined : selectedHostId.value,
+            name: name.value.trim(),
+            host: host.value.trim(),
+            port: port.value || 22,
+            username: username.value.trim(),
+            password: password.value
+        },
+        (hostId) => {
+            creating.value = false
+            selectedHostId.value = hostId
+        }
+    )
 }
 </script>
 
@@ -173,6 +272,14 @@ function connect() {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+}
+
+.panel-actions,
+.connection-actions,
+.device-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
 .panel-title,
@@ -216,9 +323,33 @@ function connect() {
 
 .connection-grid {
     display: grid;
-    grid-template-columns: minmax(180px, 1.3fr) 120px minmax(150px, 0.8fr) minmax(200px, 1fr);
+    grid-template-columns: minmax(160px, 0.9fr) minmax(180px, 1.2fr) 120px minmax(150px, 0.8fr) minmax(200px, 1fr);
     gap: 16px;
     padding: 20px;
+}
+
+.device-bar {
+    padding: 14px 20px;
+    border-bottom: 1px solid color-mix(in srgb, var(--k-color-divider), transparent 28%);
+}
+
+.device-bar .field-label {
+    margin: 0;
+    white-space: nowrap;
+}
+
+.new-device-bar {
+    justify-content: space-between;
+}
+
+.new-device-copy {
+    margin-top: 4px;
+    color: var(--k-text-light);
+    font-size: 12px;
+}
+
+.device-select {
+    width: min(100%, 480px);
 }
 
 .field {
@@ -318,6 +449,10 @@ function connect() {
     .connection-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    .name-field {
+        grid-column: 1 / -1;
+    }
 }
 
 @media (max-width: 640px) {
@@ -326,6 +461,19 @@ function connect() {
     .connection-footer {
         align-items: flex-start;
         flex-direction: column;
+    }
+
+    .panel-actions,
+    .connection-actions,
+    .device-bar {
+        align-items: stretch;
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .device-select,
+    .connection-actions :deep(.el-button) {
+        width: 100%;
     }
 
     .connection-grid {

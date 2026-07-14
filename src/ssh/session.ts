@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import { Readable } from 'stream'
 import type { ExecResult, SshHostConfig } from '../types'
 import { resolveSecret } from '../utils/shell'
+import { mimeType } from '../utils/mime'
 
 export interface TerminalHandle {
     id: string
@@ -18,11 +19,18 @@ export class SshSession {
     private client = new Client()
     private connected = false
     private home = '~'
+    private path = '/usr/local/bin:/usr/bin:/bin'
     private sftp?: SFTPWrapper
     private connecting?: Promise<void>
+    private sftpConnecting?: Promise<SFTPWrapper>
+    lastError?: string
+    lastConnectedAt?: number
     lastActiveAt = Date.now()
 
-    constructor(public readonly host: SshHostConfig) {
+    constructor(
+        public readonly host: SshHostConfig,
+        private readonly maxOutputBytes = 4 * 1024 * 1024
+    ) {
         this.hostId = host.id
     }
 
@@ -34,6 +42,10 @@ export class SshSession {
         return this.connected
     }
 
+    isConnecting() {
+        return !!this.connecting
+    }
+
     touch() {
         this.lastActiveAt = Date.now()
     }
@@ -42,6 +54,7 @@ export class SshSession {
         if (this.connected) return
         if (this.connecting) return this.connecting
 
+        this.client = new Client()
         this.connecting = new Promise<void>((resolve, reject) => {
             const auth = this.host.auth
             const config: Record<string, unknown> = {
@@ -64,23 +77,39 @@ export class SshSession {
             this.client
                 .on('ready', () => {
                     this.connected = true
+                    this.lastError = undefined
+                    this.lastConnectedAt = Date.now()
                     this.touch()
-                    this.rawExec('printf %s "$HOME"', 10000)
+                    this.rawExec(`bash -lc 'printf "%s\\n%s" "$HOME" "$PATH"'`, 10000)
                         .then((result) => {
-                            this.home = result.stdout.trim() || '~'
+                            const [home, path] = result.stdout.trim().split('\n')
+                            this.home = home || '~'
+                            this.path = path || this.path
                             resolve()
                         })
-                        .catch(reject)
+                        .catch((err) => {
+                            this.connected = false
+                            this.lastError = errorMessage(err)
+                            this.client.end()
+                            reject(err)
+                        })
                 })
                 .on('error', (err) => {
                     this.connected = false
+                    this.sftp = undefined
+                    this.sftpConnecting = undefined
+                    this.lastError = err.message
                     reject(err)
                 })
                 .on('end', () => {
                     this.connected = false
+                    this.sftp = undefined
+                    this.sftpConnecting = undefined
                 })
                 .on('close', () => {
                     this.connected = false
+                    this.sftp = undefined
+                    this.sftpConnecting = undefined
                 })
                 .connect(config as any)
         }).finally(() => {
@@ -93,12 +122,18 @@ export class SshSession {
     async disconnect(): Promise<void> {
         this.connected = false
         this.sftp = undefined
+        this.sftpConnecting = undefined
         this.client.end()
     }
 
     async exec(
         command: string,
-        options: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {}
+        options: {
+            cwd?: string
+            timeoutMs?: number
+            env?: Record<string, string>
+            signal?: AbortSignal
+        } = {}
     ): Promise<ExecResult> {
         await this.connect()
         this.touch()
@@ -107,55 +142,94 @@ export class SshSession {
         const timeoutMs = options.timeoutMs ?? 120000
         const envPrefix = options.env
             ? Object.entries(options.env)
-                  .map(([k, v]) => `export ${k}=${JSON.stringify(v)};`)
+                  .map(([k, v]) => {
+                      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+                          throw new Error(`Invalid environment variable name: ${k}`)
+                      }
+                      return `export ${k}=${shellPath(v)};`
+                  })
                   .join(' ')
             : ''
-        const wrapped = `cd ${shellPath(cwd)} 2>/dev/null || cd; ${envPrefix}${command}`
-        return this.rawExec(wrapped, timeoutMs)
+        const wrapped = `export PATH=${shellPath(this.path)}; cd ${shellPath(cwd)} 2>/dev/null || cd; ${envPrefix}${command}`
+        return this.rawExec(wrapped, timeoutMs, options.signal)
     }
 
-    private rawExec(command: string, timeoutMs: number): Promise<ExecResult> {
+    private rawExec(
+        command: string,
+        timeoutMs: number,
+        abortSignal?: AbortSignal
+    ): Promise<ExecResult> {
         return new Promise((resolve, reject) => {
             let stdout = ''
             let stderr = ''
+            let outputBytes = 0
             let settled = false
             let timedOut = false
+            let truncated = false
             let stream: ClientChannel | undefined
 
-            const timer = setTimeout(() => {
-                timedOut = true
+            const stop = (timeout: boolean, signal: string) => {
+                timedOut = timeout
                 try {
+                    stream?.signal('KILL')
                     stream?.close()
                 } catch {}
-                finish(124, 'SIGTERM')
-            }, timeoutMs)
+                finish(timeout ? 124 : 130, signal)
+            }
+            const timer = setTimeout(() => stop(true, 'SIGKILL'), timeoutMs)
+            const abort = () => stop(false, 'SIGINT')
+            abortSignal?.addEventListener('abort', abort, { once: true })
 
             const finish = (code: number, signal?: string) => {
                 if (settled) return
                 settled = true
                 clearTimeout(timer)
+                abortSignal?.removeEventListener('abort', abort)
                 this.touch()
                 resolve({
                     exitCode: code ?? (timedOut ? 124 : 1),
                     stdout,
                     stderr,
                     timedOut,
-                    signal
+                    signal,
+                    truncated
                 })
+            }
+            if (abortSignal?.aborted) abort()
+
+            const append = (current: string, data: Buffer) => {
+                const available = this.maxOutputBytes - outputBytes
+                if (available <= 0) {
+                    truncated = true
+                    return current
+                }
+                const chunk = data.length > available ? data.subarray(0, available) : data
+                outputBytes += chunk.length
+                if (chunk.length < data.length) truncated = true
+                return current + chunk.toString('utf8')
             }
 
             this.client.exec(command, (err, ch) => {
+                if (settled) {
+                    try {
+                        ch?.signal('KILL')
+                        ch?.close()
+                    } catch {}
+                    return
+                }
                 if (err) {
                     clearTimeout(timer)
+                    abortSignal?.removeEventListener('abort', abort)
+                    settled = true
                     reject(err)
                     return
                 }
                 stream = ch
                 ch.on('data', (data: Buffer) => {
-                    stdout += data.toString('utf8')
+                    stdout = append(stdout, data)
                 })
                 ch.stderr.on('data', (data: Buffer) => {
-                    stderr += data.toString('utf8')
+                    stderr = append(stderr, data)
                 })
                 ch.on('close', (code: number, signal: string) => {
                     finish(code ?? 0, signal)
@@ -167,13 +241,17 @@ export class SshSession {
     async getSftp(): Promise<SFTPWrapper> {
         await this.connect()
         if (this.sftp) return this.sftp
-        return new Promise((resolve, reject) => {
+        if (this.sftpConnecting) return this.sftpConnecting
+        this.sftpConnecting = new Promise<SFTPWrapper>((resolve, reject) => {
             this.client.sftp((err, sftp) => {
                 if (err) return reject(err)
                 this.sftp = sftp
                 resolve(sftp)
             })
+        }).finally(() => {
+            this.sftpConnecting = undefined
         })
+        return this.sftpConnecting
     }
 
     async readFile(remotePath: string): Promise<Buffer> {
@@ -190,6 +268,7 @@ export class SshSession {
     async openAsset(remotePath: string): Promise<{
         stream: Readable
         size?: number
+        mimeType?: string
     }> {
         const sftp = await this.getSftp()
         this.touch()
@@ -200,7 +279,11 @@ export class SshSession {
             })
         })
         const stream = sftp.createReadStream(remotePath)
-        return { stream: stream as unknown as Readable, size: stat.size }
+        return {
+            stream: stream as unknown as Readable,
+            size: stat.size,
+            mimeType: mimeType(remotePath)
+        }
     }
 
     async writeFile(remotePath: string, content: Buffer | string): Promise<void> {
@@ -239,12 +322,14 @@ export class SshSession {
                     let pending = ''
                     let closed = false
 
-                    stream.write(`cd ${shellPath(cwd)} 2>/dev/null || true\n`)
+                    stream.write(`export TERM=xterm-256color; cd ${shellPath(cwd)} 2>/dev/null || true\n`)
 
                     stream.on('data', (chunk: Buffer) => {
                         this.touch()
                         const text = chunk.toString('utf8')
-                        if (!listeners.size) pending += text
+                        if (!listeners.size) {
+                            pending = (pending + text).slice(-this.maxOutputBytes)
+                        }
                         for (const cb of listeners) cb(text)
                     })
 
@@ -287,4 +372,8 @@ export class SshSession {
 
 function shellPath(path: string) {
     return `'${path.replaceAll("'", `'\\''`)}'`
+}
+
+function errorMessage(err: unknown) {
+    return err instanceof Error ? err.message : String(err)
 }

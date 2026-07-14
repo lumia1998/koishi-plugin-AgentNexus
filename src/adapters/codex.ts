@@ -1,4 +1,4 @@
-import { CodeAgentAdapter, type DelegateOptions } from './base'
+import { CodeAgentAdapter, parseJsonLines, type DelegateOptions } from './base'
 import { quoteShell } from '../utils/shell'
 
 export class CodexAdapter extends CodeAgentAdapter {
@@ -10,15 +10,21 @@ export class CodexAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
-        const parts = ['codex', 'exec', '--skip-git-repo-check']
+        const parts = ['codex', 'exec', '--json', '--skip-git-repo-check']
         if (options.cwd) {
             parts.push('-C', quoteShell(options.cwd))
         }
         if (options.model) {
             parts.push('-m', quoteShell(options.model))
         }
-        parts.push('--dangerously-bypass-approvals-and-sandbox')
+        if (options.runtime.codexBypassSandbox) {
+            parts.push('--dangerously-bypass-approvals-and-sandbox')
+        }
         parts.push(promptExpr)
         return parts.join(' ')
+    }
+
+    protected parseText(stdout: string, stderr: string) {
+        return parseJsonLines(stdout) || stdout.trim() || stderr.trim()
     }
 }

@@ -224,11 +224,20 @@ async function createTab(hostId?: string) {
             tab,
             `Connecting ${host.username}@${host.host}:${host.port || 22}...\r\n`
         )
-        const info = (await send('agent-nexus/openTerminal', {
-            hostId: host.id,
-            cols: runtime.term.cols,
-            rows: runtime.term.rows
-        })) as TerminalInfo
+        let openTimer: ReturnType<typeof setTimeout> | undefined
+        const info = (await Promise.race([
+            send('agent-nexus/openTerminal', {
+                hostId: host.id,
+                cols: runtime.term.cols,
+                rows: runtime.term.rows
+            }),
+            new Promise<never>((_, reject) => {
+                openTimer = setTimeout(
+                    () => reject(new Error('SSH 终端创建超时，请检查设备连接和认证信息。')),
+                    25_000
+                )
+            })
+        ]).finally(() => clearTimeout(openTimer))) as TerminalInfo
         if (disposed) return
         tab.sessionId = info.sessionId
         tab.terminalId = info.terminalId
@@ -239,7 +248,7 @@ async function createTab(hostId?: string) {
     } catch (err: any) {
         tab.connecting = false
         tab.connected = false
-        tab.error = err?.message || String(err)
+        tab.error = String(err?.message || err).split('\n')[0]
         runtimeMap.get(key)?.term.write(`\r\n[error] ${tab.error}\r\n`)
     } finally {
         creating.value = false
@@ -315,12 +324,24 @@ async function connectSocket(
     )
 
     await new Promise<void>((resolve, reject) => {
-        if (!runtime.socket) {
-            reject(new Error('socket missing'))
-            return
+        const socket = runtime.socket
+        if (!socket) return reject(new Error('终端 WebSocket 未创建'))
+        const timer = setTimeout(() => {
+            socket.close()
+            reject(new Error('终端 WebSocket 连接超时'))
+        }, 10_000)
+        socket.onopen = () => {
+            clearTimeout(timer)
+            resolve()
         }
-        runtime.socket.onopen = () => resolve()
-        runtime.socket.onerror = () => reject(new Error('终端 WebSocket 连接失败'))
+        socket.onerror = () => {
+            clearTimeout(timer)
+            reject(new Error('终端 WebSocket 连接失败'))
+        }
+        socket.onclose = () => {
+            clearTimeout(timer)
+            reject(new Error('终端 WebSocket 在连接完成前已关闭'))
+        }
     })
 
     runtime.socket.onmessage = (event) => {
@@ -338,6 +359,7 @@ async function connectSocket(
     runtime.socket.onclose = () => {
         tab.connected = false
         tab.connecting = false
+        if (!tab.error) tab.error = '终端连接已关闭，请重新连接。'
     }
 
     syncTabSize(tab.key)

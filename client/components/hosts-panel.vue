@@ -179,6 +179,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { NexusConfig, NexusStatus, SshHostConfig } from '../../src/types'
+import { createId } from '../utils/id'
 
 const props = defineProps<{
     config: NexusConfig
@@ -209,7 +210,7 @@ function hostState(id: string) {
 function addHost() {
     draft.value = {
         name: 'remote',
-        host: '127.0.0.1',
+        host: '',
         port: 22,
         username: 'root',
         enabled: true,
@@ -251,11 +252,11 @@ function commit() {
                   passphrase: passphrase.value || undefined
               }
 
-    const id = draft.value.id || crypto.randomUUID()
+    const id = draft.value.id || createId()
     const host: SshHostConfig = {
         id,
         name: draft.value.name || 'remote',
-        host: draft.value.host || '127.0.0.1',
+        host: draft.value.host || '',
         port: draft.value.port || 22,
         username: draft.value.username || 'root',
         auth,

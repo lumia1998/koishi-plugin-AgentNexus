@@ -5,18 +5,28 @@ export class SshSessionPool {
     private sessions = new Map<string, SshSession>()
     private creating = new Map<string, Promise<SshSession>>()
     private persistent = new Set<string>()
+    private generations = new Map<string, number>()
     private idleTimer?: NodeJS.Timeout
+    private cleaning = false
+
+    constructor(private readonly maxOutputBytes = 4 * 1024 * 1024) {}
 
     startIdleCleanup(getTimeout: (hostId: string) => number) {
         this.stopIdleCleanup()
         this.idleTimer = setInterval(async () => {
+            if (this.cleaning) return
+            this.cleaning = true
             const now = Date.now()
-            for (const [key, session] of this.sessions) {
-                if (this.persistent.has(key)) continue
-                const timeout = getTimeout(session.hostId)
-                if (now - session.lastActiveAt < timeout) continue
-                this.sessions.delete(key)
-                await session.disconnect().catch(() => undefined)
+            try {
+                for (const [key, session] of this.sessions) {
+                    if (this.persistent.has(key)) continue
+                    const timeout = getTimeout(session.hostId)
+                    if (now - session.lastActiveAt < timeout) continue
+                    this.sessions.delete(key)
+                    await session.disconnect().catch(() => undefined)
+                }
+            } finally {
+                this.cleaning = false
             }
         }, 30000)
     }
@@ -55,14 +65,25 @@ export class SshSessionPool {
         if (pending) return pending
 
         const task = (async () => {
+            const generation = this.generations.get(host.id) || 0
             if (current) {
                 await current.disconnect().catch(() => undefined)
                 this.sessions.delete(key)
             }
-            const session = new SshSession(host)
-            await session.connect()
+            const session = new SshSession(host, this.maxOutputBytes)
             this.sessions.set(key, session)
-            return session
+            try {
+                await session.connect()
+                if ((this.generations.get(host.id) || 0) !== generation) {
+                    await session.disconnect().catch(() => undefined)
+                    this.sessions.delete(key)
+                    throw new Error(`SSH host changed while connecting: ${host.name}`)
+                }
+                return session
+            } catch (err) {
+                this.sessions.delete(key)
+                throw err
+            }
         })().finally(() => this.creating.delete(key))
 
         this.creating.set(key, task)
@@ -79,6 +100,7 @@ export class SshSessionPool {
     }
 
     async destroyByHost(hostId: string) {
+        this.generations.set(hostId, (this.generations.get(hostId) || 0) + 1)
         for (const [key, session] of this.sessions) {
             if (session.hostId !== hostId) continue
             this.sessions.delete(key)
@@ -88,6 +110,12 @@ export class SshSessionPool {
     }
 
     async clear() {
+        for (const session of this.sessions.values()) {
+            this.generations.set(
+                session.hostId,
+                (this.generations.get(session.hostId) || 0) + 1
+            )
+        }
         const items = Array.from(this.sessions.values())
         this.sessions.clear()
         this.persistent.clear()
@@ -100,5 +128,9 @@ export class SshSessionPool {
             if (session.hostId === hostId) n += 1
         }
         return n
+    }
+
+    getByHost(hostId: string) {
+        return Array.from(this.sessions.values()).filter((session) => session.hostId === hostId)
     }
 }

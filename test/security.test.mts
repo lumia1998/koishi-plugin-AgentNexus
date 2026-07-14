@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { EventEmitter } from 'node:events'
 import {
     buildRemoteRealpathCommand,
     isRemotePathWithinRoot,
@@ -11,9 +12,36 @@ import {
 import { ClaudeAdapter } from '../src/adapters/claude.ts'
 import { CodexAdapter } from '../src/adapters/codex.ts'
 import { OpenCodeAdapter } from '../src/adapters/opencode.ts'
+import { extractPaths, parseJsonLines } from '../src/adapters/base.ts'
 import { syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
-import { mergeHostSecrets, redactNexusConfig } from '../src/utils/config.ts'
+import {
+    mergeHostSecrets,
+    redactNexusConfig,
+    repairHostIds,
+    resolveHostReference,
+    routeCommandHost
+} from '../src/utils/config.ts'
+import { createId } from '../client/utils/id.ts'
+import { splitMessage } from '../src/utils/text.ts'
+import { mimeType } from '../src/utils/mime.ts'
+import { SshSession } from '../src/ssh/session.ts'
+
+test('creates UUIDs without crypto.randomUUID for LAN HTTP consoles', () => {
+    const id = createId({
+        getRandomValues(array) {
+            array.fill(10)
+            return array
+        }
+    })
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+})
+
+test('splits long agent replies without dropping content', () => {
+    const text = `${'a'.repeat(20)}\n${'b'.repeat(20)}`
+    const chunks = splitMessage(text, 25)
+    assert.deepEqual(chunks, ['a'.repeat(20), 'b'.repeat(20)])
+})
 
 test('rejects unsafe skill path segments', () => {
     assert.throws(() => validatePathSegment('../outside', 'skill name'))
@@ -66,6 +94,50 @@ test('quotes model overrides in agent commands', () => {
     }
 })
 
+test('honors runtime safety switches in agent commands', () => {
+    const runtime = {
+        openclawAgent: 'default',
+        claudeSkipPermissions: false,
+        codexBypassSandbox: false,
+        opencodeAuto: false,
+        defaultTimeoutMs: 1000
+    }
+    assert.doesNotMatch(new ClaudeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /skip-permissions/)
+    assert.doesNotMatch(new CodexAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /bypass-approvals/)
+    assert.doesNotMatch(new OpenCodeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /--auto/)
+
+    runtime.claudeSkipPermissions = true
+    runtime.codexBypassSandbox = true
+    runtime.opencodeAuto = true
+    assert.match(new ClaudeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /skip-permissions/)
+    assert.match(new CodexAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /bypass-approvals/)
+    assert.match(new OpenCodeAdapter().buildInnerCommand('"$PROMPT"', { prompt: '', runtime }), /--auto/)
+})
+
+test('parses JSONL agent output into readable text', () => {
+    const text = [
+        JSON.stringify({ type: 'message', part: { type: 'text', text: 'first' } }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'second' } })
+    ].join('\n')
+    assert.equal(parseJsonLines(text), 'first\nsecond')
+})
+
+test('only extracts explicitly declared or markdown-linked local files', () => {
+    const text = `Visit https://example.com/a.png and import foo/bar.ts.
+![result](./out/result.png)
+<nexus_files>
+/workspace/report.pdf
+https://example.com/remote.zip
+</nexus_files>`
+    assert.deepEqual(extractPaths(text), ['/workspace/report.pdf', './out/result.png'])
+})
+
+test('uses file-specific MIME types for data URLs and storage', () => {
+    assert.equal(mimeType('/tmp/a.png'), 'image/png')
+    assert.equal(mimeType('/tmp/a.pdf'), 'application/pdf')
+    assert.equal(mimeType('/tmp/a.unknown'), 'application/octet-stream')
+})
+
 test('expands the configured skill root through remote HOME', async () => {
     let command = ''
     const session = {
@@ -102,6 +174,9 @@ test('expands the configured skill root through remote HOME', async () => {
 
     assert.match(command, /ROOT=.*sed .*\^~/)
     assert.match(command, /REPO="\$REPOS\/demo"/)
+    assert.match(command, /SKILL\.md not found/)
+    assert.match(command, /STAGE=/)
+    assert.match(command, /BACKUP=/)
 })
 
 test('fails clearly when a referenced secret environment variable is missing', () => {
@@ -178,4 +253,164 @@ test('keeps stored secrets when an edited host submits blank credentials', () =>
     }
 
     assert.deepEqual(mergeHostSecrets(incoming, previous).auth, previous.auth)
+})
+
+test('resolves SSH hosts by ID, address, name, and connection target', () => {
+    const hosts = [
+        {
+            id: 'host-50',
+            name: 'Build Server',
+            host: '10.1.2.50',
+            port: 22,
+            username: 'lumia',
+            auth: { type: 'password' as const, password: 'secret' },
+            enabled: true,
+            idleTimeoutMs: 1000
+        }
+    ]
+
+    assert.equal(resolveHostReference(hosts, 'host-50')?.id, 'host-50')
+    assert.equal(resolveHostReference(hosts, '10.1.2.50')?.id, 'host-50')
+    assert.equal(resolveHostReference(hosts, 'Build Server')?.id, 'host-50')
+    assert.equal(resolveHostReference(hosts, '10.1.2.50:22')?.id, 'host-50')
+    assert.equal(resolveHostReference(hosts, 'lumia@10.1.2.50')?.id, 'host-50')
+    assert.equal(resolveHostReference(hosts, 'lumia@10.1.2.50:22')?.id, 'host-50')
+})
+
+test('rejects ambiguous SSH host addresses', () => {
+    const hosts = ['first', 'second'].map((id) => ({
+        id,
+        name: id,
+        host: '10.1.2.50',
+        port: 22,
+        username: id,
+        auth: { type: 'password' as const, password: 'secret' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }))
+    assert.throws(() => resolveHostReference(hosts, '10.1.2.50'), /ambiguous/)
+})
+
+test('repairs missing and duplicate SSH host IDs', () => {
+    const hosts = ['', '', 'same', 'same'].map((id, index) => ({
+        id,
+        name: `host-${index}`,
+        host: `10.1.2.${30 + index}`,
+        port: 22,
+        username: 'root',
+        auth: { type: 'password' as const, password: 'secret' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }))
+    const repaired = repairHostIds(hosts)
+    assert.equal(repaired.changed, true)
+    assert.equal(new Set(repaired.hosts.map((host) => host.id)).size, 4)
+    assert.ok(repaired.hosts.every((host) => host.id))
+})
+
+test('routes commands directly when only one SSH host is enabled', () => {
+    const hosts = [
+        {
+            id: 'only',
+            name: 'hermes',
+            host: '10.1.2.40',
+            port: 22,
+            username: 'lumia',
+            auth: { type: 'password' as const, password: 'secret' },
+            enabled: true,
+            idleTimeoutMs: 1000
+        }
+    ]
+    assert.deepEqual(routeCommandHost(hosts, '查看 Linux 版本'), {
+        hostId: 'only',
+        prompt: '查看 Linux 版本'
+    })
+})
+
+test('routes multi-host commands by leading device name', () => {
+    const hosts = ['hermes', 'claude'].map((name, index) => ({
+        id: `host-${index}`,
+        name,
+        host: `10.1.2.${40 + index}`,
+        port: 22,
+        username: 'lumia',
+        auth: { type: 'password' as const, password: 'secret' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }))
+    assert.deepEqual(routeCommandHost(hosts, 'hermes 查看 Linux 版本'), {
+        hostId: 'host-0',
+        prompt: '查看 Linux 版本'
+    })
+    assert.throws(() => routeCommandHost(hosts, '查看 Linux 版本'), /hermes、claude/)
+})
+
+function sshSession(maxOutputBytes = 1024) {
+    const session = new SshSession({
+        id: 'host',
+        name: 'host',
+        host: '127.0.0.1',
+        port: 22,
+        username: 'root',
+        auth: { type: 'password', password: 'secret' },
+        enabled: true,
+        idleTimeoutMs: 1000
+    }, maxOutputBytes)
+    ;(session as any).connect = async () => undefined
+    ;(session as any).connected = true
+    return session
+}
+
+test('closes an SSH channel that arrives after the command timed out', async () => {
+    const session = sshSession()
+    let closed = false
+    ;(session as any).client = {
+        exec(_command: string, callback: (err: Error | undefined, channel: any) => void) {
+            setTimeout(() => {
+                const channel = new EventEmitter() as any
+                channel.stderr = new EventEmitter()
+                channel.signal = () => undefined
+                channel.close = () => { closed = true }
+                callback(undefined, channel)
+            }, 20)
+        }
+    }
+    const result = await session.exec('sleep 1', { timeoutMs: 5 })
+    assert.equal(result.timedOut, true)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(closed, true)
+})
+
+test('limits captured SSH output', async () => {
+    const session = sshSession(5)
+    ;(session as any).client = {
+        exec(_command: string, callback: (err: Error | undefined, channel: any) => void) {
+            const channel = new EventEmitter() as any
+            channel.stderr = new EventEmitter()
+            channel.signal = () => undefined
+            channel.close = () => undefined
+            callback(undefined, channel)
+            channel.emit('data', Buffer.from('123456789'))
+            channel.emit('close', 0, '')
+        }
+    }
+    const result = await session.exec('echo test')
+    assert.equal(result.stdout, '12345')
+    assert.equal(result.truncated, true)
+})
+
+test('shares an in-flight SFTP initialization', async () => {
+    const session = sshSession()
+    const wrapper = {} as any
+    let calls = 0
+    ;(session as any).client = {
+        sftp(callback: (err: Error | undefined, sftp: any) => void) {
+            calls += 1
+            setTimeout(() => callback(undefined, wrapper), 5)
+        }
+    }
+    const [first, second] = await Promise.all([session.getSftp(), session.getSftp()])
+    assert.equal(calls, 1)
+    assert.equal(first, wrapper)
+    assert.equal(second, wrapper)
 })

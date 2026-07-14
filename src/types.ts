@@ -74,6 +74,7 @@ export interface HostStatus {
     error?: string
     agents: DetectedAgent[]
     sessionCount: number
+    lastConnectedAt?: number
 }
 
 export interface NexusStatus {
@@ -104,6 +105,7 @@ export interface DelegateInput {
     timeoutMs?: number
     openclawAgent?: string
     publishFiles?: boolean
+    signal?: AbortSignal
 }
 
 export interface AgentResult {
@@ -115,6 +117,7 @@ export interface AgentResult {
     exitCode: number
     timedOut: boolean
     command: string
+    truncated?: boolean
 }
 
 export interface PublishResult {
@@ -143,4 +146,5 @@ export interface ExecResult {
     stderr: string
     timedOut: boolean
     signal?: string
+    truncated?: boolean
 }

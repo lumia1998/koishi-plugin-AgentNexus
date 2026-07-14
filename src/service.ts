@@ -39,8 +39,13 @@ import {
 import {
     hostConnectionChanged,
     mergeHostSecrets,
-    redactNexusConfig
+    redactNexusConfig,
+    repairHostIds,
+    resolveHostReference
 } from './utils/config'
+import { registerNexusCommands } from './commands'
+import type { Config } from './config'
+import { mimeType } from './utils/mime'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -49,12 +54,13 @@ interface ManagedTerminal {
     persistent: boolean
     expiresAt: number
     attached: boolean
+    expiryTimer?: NodeJS.Timeout
 }
 
 export class AgentNexusService extends Service {
     static readonly inject = ['chatluna']
 
-    private pool = new SshSessionPool()
+    private pool: SshSessionPool
     private proxy: NexusTerminalProxy
     private terminals = new Map<string, Map<string, ManagedTerminal>>()
     private agentCache = new Map<string, DetectedAgent[]>()
@@ -64,12 +70,15 @@ export class AgentNexusService extends Service {
     private reconnecting = false
     private nexusConfig: NexusConfig
     private dataPath: string
+    private activeByHost = new Map<string, number>()
+    private hostErrors = new Map<string, string>()
 
     constructor(
         ctx: Context,
-        private pluginConfig: { defaultTimeoutMs: number; skillRoot: string }
+        private pluginConfig: Config
     ) {
         super(ctx, 'agent_nexus')
+        this.pool = new SshSessionPool(pluginConfig.maxOutputBytes)
         this.dataPath = path.join(ctx.baseDir, 'data', 'agent-nexus')
         this.nexusConfig = createDefaultNexusConfig(pluginConfig)
         this.proxy = new NexusTerminalProxy(ctx, this)
@@ -77,6 +86,7 @@ export class AgentNexusService extends Service {
 
     async start() {
         await this.loadConfig()
+        registerNexusCommands(this.ctx, this, this.pluginConfig)
         this.pool.startIdleCleanup((hostId) => {
             const host = this.nexusConfig.hosts.find((h) => h.id === hostId)
             return host?.idleTimeoutMs ?? 15 * 60 * 1000
@@ -110,6 +120,13 @@ export class AgentNexusService extends Service {
         const hosts = (cfg.hosts || []).map((host) =>
             mergeHostSecrets(host, previousHosts.get(host.id))
         )
+        const scanHostIds = hosts
+            .filter((host) => {
+                if (!host.enabled) return false
+                const previous = previousHosts.get(host.id)
+                return !previous || hostConnectionChanged(previous, host)
+            })
+            .map((host) => host.id)
         const nextConfig: NexusConfig = {
             ...cfg,
             hosts,
@@ -127,26 +144,47 @@ export class AgentNexusService extends Service {
             if (!nextHostIds.has(previous.id) || (next && hostConnectionChanged(previous, next))) {
                 await this.pool.destroyByHost(previous.id)
                 this.agentCache.delete(previous.id)
+                this.hostErrors.delete(previous.id)
             }
+        }
+        if (
+            this.nexusConfig.defaultHostId &&
+            this.nexusConfig.defaultHostId !== nextConfig.defaultHostId
+        ) {
+            this.pool.release(this.nexusConfig.defaultHostId)
         }
         this.nexusConfig = nextConfig
         await this.writeConfigFile()
         this.syncTools()
-        void this.ensureDefaultConnection(true)
+        for (const hostId of scanHostIds) await this.scanAgents(hostId)
+        void this.ensureDefaultConnection()
         await this.refreshConsoleData()
     }
 
     getStatus(): NexusStatus {
         const hosts: HostStatus[] = this.nexusConfig.hosts.map((host) => {
             const agents = this.agentCache.get(host.id) || emptyAgents()
+            const sessions = this.pool.getByHost(host.id)
+            const connected = sessions.find((session) => session.isConnected())
+            const connecting = sessions.some((session) => session.isConnecting())
+            const error = this.hostErrors.get(host.id) || sessions.find((session) => session.lastError)?.lastError
             return {
                 id: host.id,
                 name: host.name,
                 host: `${host.username}@${host.host}:${host.port || 22}`,
-                state: host.enabled ? 'idle' : 'error',
-                error: host.enabled ? undefined : 'disabled',
+                state: !host.enabled
+                    ? 'error'
+                    : connected
+                      ? 'connected'
+                      : connecting
+                        ? 'connecting'
+                        : error
+                          ? 'error'
+                          : 'idle',
+                error: host.enabled ? error : 'disabled',
                 agents,
-                sessionCount: this.pool.countByHost(host.id)
+                sessionCount: this.pool.countByHost(host.id),
+                lastConnectedAt: connected?.lastConnectedAt
             }
         })
 
@@ -185,10 +223,14 @@ export class AgentNexusService extends Service {
             if (result.exitCode !== 0) {
                 throw new Error(result.stderr || result.stdout || 'test failed')
             }
+            this.hostErrors.delete(host.id)
             return {
                 ok: true,
                 output: result.stdout.trim()
             }
+        } catch (err) {
+            this.hostErrors.set(host.id, getErrorMessage(err))
+            throw err
         } finally {
             await this.pool.destroy(session.sessionId).catch(() => undefined)
         }
@@ -215,6 +257,7 @@ export class AgentNexusService extends Service {
                     detected.push(await adapter.detect(session))
                 }
                 this.agentCache.set(host.id, detected)
+                this.hostErrors.delete(host.id)
             } catch (err) {
                 this.agentCache.set(
                     host.id,
@@ -223,6 +266,7 @@ export class AgentNexusService extends Service {
                         installed: false
                     }))
                 )
+                this.hostErrors.set(host.id, getErrorMessage(err))
                 this.ctx.logger.warn(`[agent-nexus] ${getErrorMessage(err)}`)
             }
         }
@@ -274,48 +318,61 @@ export class AgentNexusService extends Service {
         AgentResult & { published?: PublishResult[]; hostId: string }
     > {
         const host = this.resolveHost(input.hostId)
-        const session = await this.pool.getOrCreate(host)
-        const agent = await this.resolveAgent(host, session.sessionId, input.agent)
-        const adapter = getAdapter(agent)
-
-        const prompt = appendFileHint(input.prompt)
-        const timeoutMs =
-            input.timeoutMs ??
-            this.nexusConfig.runtime.defaultTimeoutMs ??
-            this.pluginConfig.defaultTimeoutMs
-
-        const command = adapter.buildCommand({
-            prompt,
-            cwd: input.cwd || host.cwd,
-            model: input.model,
-            timeoutMs,
-            openclawAgent: input.openclawAgent,
-            runtime: this.nexusConfig.runtime
-        })
-
-        const exec = await session.exec(command, {
-            cwd: input.cwd || host.cwd,
-            timeoutMs
-        })
-
-        const result = adapter.parseResult(
-            exec.stdout,
-            exec.stderr,
-            exec.exitCode,
-            exec.timedOut,
-            command
-        )
-
-        let published: PublishResult[] | undefined
-        if (input.publishFiles && result.files.length) {
-            published = await this.publishFiles(
-                result.files,
-                host.id,
-                input.cwd || host.cwd
-            )
+        const active = this.activeByHost.get(host.id) || 0
+        if (active >= this.pluginConfig.maxConcurrentPerHost) {
+            throw new Error(`Host ${host.name} has reached its Agent task limit`)
         }
+        this.activeByHost.set(host.id, active + 1)
+        try {
+            const session = await this.pool.getOrCreate(host)
+            const agent = await this.resolveAgent(host, session.sessionId, input.agent)
+            const adapter = getAdapter(agent)
 
-        return { ...result, published, hostId: host.id }
+            const prompt = appendFileHint(input.prompt)
+            const timeoutMs =
+                input.timeoutMs ??
+                this.nexusConfig.runtime.defaultTimeoutMs ??
+                this.pluginConfig.defaultTimeoutMs
+
+            const command = adapter.buildCommand({
+                prompt,
+                cwd: input.cwd || host.cwd,
+                model: input.model,
+                timeoutMs,
+                openclawAgent: input.openclawAgent,
+                runtime: this.nexusConfig.runtime
+            })
+
+            const exec = await session.exec(command, {
+                cwd: input.cwd || host.cwd,
+                timeoutMs,
+                signal: input.signal
+            })
+
+            const result = adapter.parseResult(
+                exec.stdout,
+                exec.stderr,
+                exec.exitCode,
+                exec.timedOut,
+                command
+            )
+            result.truncated = exec.truncated
+
+            let published: PublishResult[] | undefined
+            if (input.publishFiles && result.files.length) {
+                published = await this.publishFiles(
+                    result.files,
+                    host.id,
+                    input.cwd || host.cwd
+                )
+            }
+
+            return { ...result, published, hostId: host.id }
+        } finally {
+            const remaining = (this.activeByHost.get(host.id) || 1) - 1
+            if (remaining > 0) this.activeByHost.set(host.id, remaining)
+            else this.activeByHost.delete(host.id)
+        }
     }
 
     async publishFiles(
@@ -345,24 +402,26 @@ export class AgentNexusService extends Service {
                     const file = await storage.createTempFileFromStream(
                         asset.stream,
                         name,
-                        { size: asset.size }
+                        { size: asset.size, mimeType: asset.mimeType }
                     )
                     out.push({ path: remotePath, name, url: file.url })
                 } else {
-                    const buf = await session.readFile(canonicalPath)
-                    // fallback: data URL for small files only
-                    if (buf.length > 2 * 1024 * 1024) {
+                    const asset = await session.openAsset(canonicalPath)
+                    if ((asset.size || 0) > 2 * 1024 * 1024) {
+                        asset.stream.destroy()
                         out.push({
                             path: remotePath,
                             name,
                             error: 'chatluna_storage unavailable and file too large'
                         })
                     } else {
+                        asset.stream.destroy()
+                        const buf = await session.readFile(canonicalPath)
                         const b64 = buf.toString('base64')
                         out.push({
                             path: remotePath,
                             name,
-                            url: `data:application/octet-stream;base64,${b64}`
+                            url: `data:${mimeType(name)};base64,${b64}`
                         })
                     }
                 }
@@ -421,14 +480,18 @@ export class AgentNexusService extends Service {
         const map =
             this.terminals.get(session.sessionId) ??
             new Map<string, ManagedTerminal>()
-        map.set(terminal.id, {
+        const item: ManagedTerminal = {
             terminal,
             token,
             hostId: host.id,
             persistent: false,
             expiresAt: Date.now() + 60_000,
             attached: false
-        })
+        }
+        item.expiryTimer = setTimeout(() => {
+            if (!item.attached) this.closeTerminal(session.sessionId, terminal.id)
+        }, 60_000)
+        map.set(terminal.id, item)
         this.terminals.set(session.sessionId, map)
 
         return {
@@ -450,6 +513,8 @@ export class AgentNexusService extends Service {
             return undefined
         }
         item.attached = true
+        if (item.expiryTimer) clearTimeout(item.expiryTimer)
+        item.expiryTimer = undefined
         return item
     }
 
@@ -457,6 +522,7 @@ export class AgentNexusService extends Service {
         const map = this.terminals.get(sessionId)
         const item = map?.get(terminalId)
         if (!item || item.persistent) return
+        if (item.expiryTimer) clearTimeout(item.expiryTimer)
         item.terminal.kill()
         map?.delete(terminalId)
         if (map && map.size < 1) this.terminals.delete(sessionId)
@@ -466,6 +532,7 @@ export class AgentNexusService extends Service {
         const map = this.terminals.get(sessionId)
         const item = map?.get(terminalId)
         if (!item) return
+        if (item.expiryTimer) clearTimeout(item.expiryTimer)
         item.terminal.kill()
         map?.delete(terminalId)
         if (map && map.size < 1) this.terminals.delete(sessionId)
@@ -475,6 +542,7 @@ export class AgentNexusService extends Service {
         for (const [sid, map] of this.terminals) {
             for (const [tid, item] of map) {
                 item.terminal.kill()
+                if (item.expiryTimer) clearTimeout(item.expiryTimer)
                 map.delete(tid)
             }
             this.terminals.delete(sid)
@@ -581,6 +649,7 @@ export class AgentNexusService extends Service {
             await this.pool.getOrCreate(host)
             if (scan || !this.agentCache.has(host.id)) await this.scanAgents(host.id)
         } catch (err) {
+            this.hostErrors.set(host.id, getErrorMessage(err))
             this.ctx.logger.warn(`[agent-nexus] SSH reconnect failed: ${getErrorMessage(err)}`)
         } finally {
             this.reconnecting = false
@@ -595,7 +664,7 @@ export class AgentNexusService extends Service {
     }
 
     private requireHost(hostId: string) {
-        const host = this.nexusConfig.hosts.find((h) => h.id === hostId)
+        const host = resolveHostReference(this.nexusConfig.hosts, hostId)
         if (!host) throw new Error(`Host not found: ${hostId}`)
         if (!host.enabled) throw new Error(`Host disabled: ${host.name}`)
         return host
@@ -608,6 +677,12 @@ export class AgentNexusService extends Service {
         try {
             const raw = await readFile(file, 'utf8')
             const parsed = JSON.parse(raw) as NexusConfig
+            const repaired = repairHostIds(parsed.hosts || [])
+            const defaultHostId = repaired.hosts.some(
+                (host) => host.id === parsed.defaultHostId
+            )
+                ? parsed.defaultHostId
+                : repaired.hosts.find((host) => host.enabled)?.id || repaired.hosts[0]?.id
             this.nexusConfig = {
                 ...createDefaultNexusConfig(this.pluginConfig),
                 ...parsed,
@@ -619,8 +694,12 @@ export class AgentNexusService extends Service {
                     ...createDefaultNexusConfig(this.pluginConfig).runtime,
                     ...parsed.runtime
                 },
-                hosts: parsed.hosts || [],
-                skills: parsed.skills || []
+                hosts: repaired.hosts,
+                skills: parsed.skills || [],
+                defaultHostId
+            }
+            if (repaired.changed || defaultHostId !== parsed.defaultHostId) {
+                await this.writeConfigFile()
             }
         } catch {
             this.nexusConfig = createDefaultNexusConfig(this.pluginConfig)

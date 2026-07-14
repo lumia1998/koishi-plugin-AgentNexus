@@ -64,11 +64,16 @@ export class NexusTerminalProxy {
             try {
                 const msg = JSON.parse(text)
                 if (msg.type === 'input') {
-                    item.terminal.sendInput(String(msg.data ?? ''))
+                    const data = String(msg.data ?? '')
+                    if (Buffer.byteLength(data) <= 64 * 1024) {
+                        item.terminal.sendInput(data)
+                    }
                     return
                 }
                 if (msg.type === 'resize') {
-                    item.terminal.resize(Number(msg.cols) || 80, Number(msg.rows) || 24)
+                    const cols = Math.min(500, Math.max(2, Number(msg.cols) || 80))
+                    const rows = Math.min(300, Math.max(1, Number(msg.rows) || 24))
+                    item.terminal.resize(cols, rows)
                     return
                 }
                 if (msg.type === 'kill') {

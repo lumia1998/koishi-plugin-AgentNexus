@@ -1,7 +1,12 @@
 import { Context } from 'koishi'
 import { resolve } from 'path'
 import type { AgentNexusService } from '../service'
-import type { NexusConfig, SkillSourceConfig, SshHostConfig } from '../types'
+import type {
+    AgentKind,
+    NexusConfig,
+    SkillSourceConfig,
+    SshHostConfig
+} from '../types'
 import { createHost } from '../config'
 import { randomUUID } from 'crypto'
 
@@ -29,16 +34,22 @@ export function apply(ctx: Context) {
 
     ctx.console.addListener('agent-nexus/saveHost', async (input: Partial<SshHostConfig>) => {
         const cfg = structuredClone(nexus().getConfig())
+        let hostId = input.id
         if (input.id) {
             const idx = cfg.hosts.findIndex((h) => h.id === input.id)
-            if (idx >= 0) cfg.hosts[idx] = { ...cfg.hosts[idx], ...input } as SshHostConfig
-            else cfg.hosts.push(createHost(input))
+            if (idx < 0) throw new Error(`Host not found: ${input.id}`)
+            cfg.hosts[idx] = { ...cfg.hosts[idx], ...input } as SshHostConfig
         } else {
-            cfg.hosts.push(createHost(input))
+            const host = createHost({
+                ...input,
+                name: input.name || `SSH Computer ${cfg.hosts.length + 1}`
+            })
+            hostId = host.id
+            cfg.hosts.push(host)
         }
         if (!cfg.defaultHostId) cfg.defaultHostId = cfg.hosts[0]?.id
         await nexus().saveConfig(cfg)
-        return { success: true, hosts: cfg.hosts }
+        return { success: true, hostId: hostId!, data: nexus().getConsoleData() }
     })
 
     ctx.console.addListener('agent-nexus/removeHost', async (hostId: string) => {
@@ -105,7 +116,7 @@ export function apply(ctx: Context) {
         'agent-nexus/delegate',
         async (input: {
             prompt: string
-            agent?: any
+            agent?: AgentKind | 'auto'
             hostId?: string
             cwd?: string
             publishFiles?: boolean
@@ -123,7 +134,11 @@ declare module '@koishijs/plugin-console' {
         'agent-nexus/saveConfig'(cfg: import('../types').NexusConfig): Promise<{ success: boolean }>
         'agent-nexus/saveHost'(
             input: Partial<import('../types').SshHostConfig>
-        ): Promise<{ success: boolean; hosts?: import('../types').SshHostConfig[] }>
+        ): Promise<{
+            success: boolean
+            hostId: string
+            data: import('../types').NexusConsoleData
+        }>
         'agent-nexus/removeHost'(hostId: string): Promise<{ success: boolean }>
         'agent-nexus/testHost'(hostId: string): Promise<{ ok: boolean; output?: string }>
         'agent-nexus/scanAgents'(hostId?: string): Promise<import('../types').NexusStatus>
@@ -147,10 +162,10 @@ declare module '@koishijs/plugin-console' {
         ): Promise<{ success: boolean }>
         'agent-nexus/delegate'(input: {
             prompt: string
-            agent?: any
+            agent?: import('../types').AgentKind | 'auto'
             hostId?: string
             cwd?: string
             publishFiles?: boolean
-        }): Promise<any>
+        }): ReturnType<import('../service').AgentNexusService['delegate']>
     }
 }

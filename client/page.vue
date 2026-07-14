@@ -56,6 +56,7 @@
                 :status="status"
                 :connecting="connecting"
                 @connect="connectComputer"
+                @remove="removeComputer"
             />
             <skills-panel
                 v-else-if="active === 'skills'"
@@ -76,7 +77,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { send } from '@koishijs/client'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ComputerPanel from './components/computer-panel.vue'
 import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
@@ -171,54 +172,57 @@ async function autoConnectAndScan() {
 }
 
 async function connectComputer(input: {
+    id?: string
+    name: string
     host: string
     port: number
     username: string
     password: string
-}) {
+}, done: (hostId: string) => void) {
     connecting.value = true
     try {
-        const current = config.value.hosts[0]
-        const id = current?.id || crypto.randomUUID()
-        config.value = {
-            ...config.value,
-            defaultHostId: id,
-            hosts: [
-                {
-                    id,
-                    name: 'SSH Computer',
-                    host: input.host,
-                    port: input.port,
-                    username: input.username,
-                    auth: { type: 'password', password: input.password },
-                    enabled: true,
-                    defaultAgent: 'auto',
-                    cwd: current?.cwd,
-                    idleTimeoutMs: current?.idleTimeoutMs || 15 * 60 * 1000
-                }
-            ],
-            agents: {
-                hermes: true,
-                openclaw: true,
-                claude: true,
-                opencode: true,
-                codex: true
-            },
-            runtime: {
-                ...config.value.runtime,
-                claudeSkipPermissions: true,
-                codexBypassSandbox: true,
-                opencodeAuto: true
-            }
-        }
-        await send('agent-nexus/saveConfig', config.value)
-        const result = await send('agent-nexus/testHost', id)
-        status.value = await send('agent-nexus/scanAgents', id)
-        ElMessage.success(result.output || '连接并扫描完成')
+        const result = await send('agent-nexus/saveHost', {
+            id: input.id,
+            name: input.name,
+            host: input.host,
+            port: input.port,
+            username: input.username,
+            auth: { type: 'password', password: input.password },
+            enabled: true,
+            defaultAgent: 'auto',
+            idleTimeoutMs: 15 * 60 * 1000
+        })
+        config.value = result.data.config
+        status.value = result.data.status
+        done(result.hostId)
+        const host = result.data.status.hosts.find((item) => item.id === result.hostId)
+        if (host?.error) ElMessage.warning(`设备已保存，连接失败：${host.error}`)
+        else ElMessage.success('设备已保存并完成扫描')
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
     } finally {
         connecting.value = false
+    }
+}
+
+async function removeComputer(hostId: string) {
+    try {
+        const host = config.value.hosts.find((item) => item.id === hostId)
+        await ElMessageBox.confirm(
+            `确定删除设备“${host?.name || hostId}”吗？`,
+            '删除 SSH 设备',
+            {
+                confirmButtonText: '删除',
+                cancelButtonText: '取消',
+                type: 'warning'
+            }
+        )
+        await send('agent-nexus/removeHost', hostId)
+        await reload()
+        ElMessage.success('SSH 设备已删除')
+    } catch (err: any) {
+        if (err === 'cancel' || err === 'close') return
+        ElMessage.error(err?.message || String(err))
     }
 }
 

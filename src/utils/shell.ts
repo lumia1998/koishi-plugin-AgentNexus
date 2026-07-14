@@ -38,5 +38,5 @@ export function wrapPromptCommand(
     prompt: string
 ): string {
     const b64 = base64Prompt(prompt)
-    return `PROMPT=$(printf %s ${quoteShell(b64)} | base64 -d) && ${build('"$PROMPT"')}`
+    return `PROMPT=$(printf %s ${quoteShell(b64)} | base64 -d) && exec ${build('"$PROMPT"')}`
 }

@@ -43,6 +43,9 @@ export async function syncSkillSource(
         `REPOS="$ROOT/../repos"`,
         `REPO="$REPOS/${sourceId}"`,
         `SKILL="$ROOT/${name}"`,
+        `STAGE="$ROOT/.${name}.stage.$$"`,
+        `BACKUP="$ROOT/.${name}.backup.$$"`,
+        `trap 'rm -rf "$STAGE" "$BACKUP"' EXIT`,
         `mkdir -p "$REPOS" "$ROOT"`,
         `if [ -d "$REPO/.git" ]; then`,
         `  git -C "$REPO" fetch --depth 1 origin ${quoteShell(branch)}`,
@@ -58,9 +61,13 @@ export async function syncSkillSource(
         `  FOUND=$(find "$SRC" -maxdepth 3 -type f -name SKILL.md | head -n 1 || true)`,
         `  if [ -n "$FOUND" ]; then SRC=$(dirname "$FOUND"); fi`,
         `fi`,
-        `rm -rf "$SKILL"`,
-        `mkdir -p "$SKILL"`,
-        `cp -a "$SRC"/. "$SKILL"/`,
+        `[ -f "$SRC/SKILL.md" ] || { echo "SKILL.md not found" >&2; exit 1; }`,
+        `rm -rf "$STAGE" "$BACKUP"`,
+        `mkdir -p "$STAGE"`,
+        `cp -a "$SRC"/. "$STAGE"/`,
+        `[ -f "$STAGE/SKILL.md" ] || { echo "Skill staging failed" >&2; exit 1; }`,
+        `if [ -e "$SKILL" ]; then mv "$SKILL" "$BACKUP"; fi`,
+        `if mv "$STAGE" "$SKILL"; then rm -rf "$BACKUP"; else [ ! -e "$BACKUP" ] || mv "$BACKUP" "$SKILL"; exit 1; fi`,
         `printf %s "$SKILL"`
     ].join('\n')
 
