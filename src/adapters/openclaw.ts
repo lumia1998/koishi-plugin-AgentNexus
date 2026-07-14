@@ -11,8 +11,21 @@ export class OpenClawAdapter extends CodeAgentAdapter {
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
         const agent = options.openclawAgent || options.runtime.openclawAgent || 'default'
-        // promptExpr is already quoted shell expression like "$PROMPT"
-        // openclaw expects --query value
-        return `openclaw agent --local --agent ${quoteShell(agent)} --query ${promptExpr}`
+        return `openclaw agent --local --agent ${quoteShell(agent)} --message ${promptExpr} --json`
+    }
+
+    protected parseText(stdout: string, stderr: string) {
+        const out = stdout.trim()
+        if (!out) return stderr.trim()
+        try {
+            const json = JSON.parse(out)
+            const text = json?.payloads
+                ?.map((item: any) => item?.text)
+                .filter((item: unknown): item is string => typeof item === 'string')
+                .join('\n')
+            return text || out
+        } catch {
+            return out
+        }
     }
 }

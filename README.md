@@ -138,10 +138,10 @@ AgentNexus 当前使用以下 CLI 方式：
 
 ```bash
 hermes chat -Q -q "..."
-openclaw agent --local --agent default --query "..."
+openclaw agent --local --agent default --message "..." --json
 claude -p "..." --output-format json --dangerously-skip-permissions
 opencode run --format json --auto "..."
-codex exec --dangerously-bypass-approvals-and-sandbox "..."
+codex exec --json --ephemeral --dangerously-bypass-approvals-and-sandbox "..."
 ```
 
 ## 安全警告

@@ -1,4 +1,4 @@
-import { CodeAgentAdapter, parseJsonLines, type DelegateOptions } from './base'
+import { CodeAgentAdapter, type DelegateOptions } from './base'
 import { quoteShell } from '../utils/shell'
 
 export class OpenCodeAdapter extends CodeAgentAdapter {
@@ -22,6 +22,20 @@ export class OpenCodeAdapter extends CodeAgentAdapter {
     }
 
     protected parseText(stdout: string, stderr: string) {
-        return parseJsonLines(stdout) || stdout.trim() || stderr.trim()
+        const text = stdout
+            .split(/\r?\n/)
+            .map((line) => {
+                try {
+                    const event = JSON.parse(line)
+                    return event?.type === 'text' && typeof event?.part?.text === 'string'
+                        ? event.part.text
+                        : ''
+                } catch {
+                    return ''
+                }
+            })
+            .filter(Boolean)
+            .join('\n')
+        return text || stdout.trim() || stderr.trim()
     }
 }

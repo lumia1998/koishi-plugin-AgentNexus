@@ -12,6 +12,7 @@ import {
 import { ClaudeAdapter } from '../src/adapters/claude.ts'
 import { CodexAdapter } from '../src/adapters/codex.ts'
 import { HermesAdapter } from '../src/adapters/hermes.ts'
+import { OpenClawAdapter } from '../src/adapters/openclaw.ts'
 import { OpenCodeAdapter } from '../src/adapters/opencode.ts'
 import { cleanAgentText, extractPaths, parseJsonLines } from '../src/adapters/base.ts'
 import { syncSkillSource } from '../src/skills/sync.ts'
@@ -138,6 +139,89 @@ test('runs Hermes one-shot queries without CLI presentation output', () => {
         }
     })
     assert.equal(command, 'hermes chat -Q -q "$PROMPT"')
+})
+
+test('uses Claude Code single-result JSON without session persistence', () => {
+    const adapter = new ClaudeAdapter()
+    const command = adapter.buildInnerCommand('"$PROMPT"', {
+        prompt: '',
+        runtime: {
+            openclawAgent: 'default',
+            claudeSkipPermissions: false,
+            codexBypassSandbox: false,
+            opencodeAuto: true,
+            defaultTimeoutMs: 1000
+        }
+    })
+    assert.match(command, /-p "\$PROMPT" --output-format json --no-session-persistence/)
+    const result = adapter.parseResult(
+        JSON.stringify({ result: 'final answer', session_id: 'ignored' }),
+        '',
+        0,
+        false,
+        command
+    )
+    assert.equal(result.text, 'final answer')
+})
+
+test('uses current OpenClaw JSON agent invocation', () => {
+    const adapter = new OpenClawAdapter()
+    const command = adapter.buildInnerCommand('"$PROMPT"', {
+        prompt: '',
+        runtime: {
+            openclawAgent: 'main',
+            claudeSkipPermissions: false,
+            codexBypassSandbox: false,
+            opencodeAuto: true,
+            defaultTimeoutMs: 1000
+        }
+    })
+    assert.equal(
+        command,
+        `openclaw agent --local --agent 'main' --message "$PROMPT" --json`
+    )
+    const result = adapter.parseResult(
+        JSON.stringify({ payloads: [{ text: 'first' }, { text: 'second' }] }),
+        '',
+        0,
+        false,
+        command
+    )
+    assert.equal(result.text, 'first\nsecond')
+})
+
+test('keeps only OpenCode assistant text events', () => {
+    const adapter = new OpenCodeAdapter()
+    const stdout = [
+        JSON.stringify({ type: 'step_start', part: { text: 'starting' } }),
+        JSON.stringify({ type: 'tool_use', part: { text: 'tool preview' } }),
+        JSON.stringify({ type: 'text', part: { text: 'final answer' } })
+    ].join('\n')
+    const result = adapter.parseResult(stdout, '', 0, false, 'opencode run')
+    assert.equal(result.text, 'final answer')
+})
+
+test('keeps only completed Codex agent messages', () => {
+    const adapter = new CodexAdapter()
+    const stdout = [
+        JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', text: 'ls' } }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } })
+    ].join('\n')
+    const result = adapter.parseResult(stdout, '', 0, false, 'codex exec')
+    assert.equal(result.text, 'done')
+    assert.match(
+        adapter.buildInnerCommand('"$PROMPT"', {
+            prompt: '',
+            runtime: {
+                openclawAgent: 'default',
+                claudeSkipPermissions: false,
+                codexBypassSandbox: false,
+                opencodeAuto: true,
+                defaultTimeoutMs: 1000
+            }
+        }),
+        /--json --ephemeral/
+    )
 })
 
 test('removes internal file manifests from user-visible agent text', () => {

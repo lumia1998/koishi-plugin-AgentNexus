@@ -1,4 +1,4 @@
-import { CodeAgentAdapter, parseJsonLines, type DelegateOptions } from './base'
+import { CodeAgentAdapter, type DelegateOptions } from './base'
 import { quoteShell } from '../utils/shell'
 
 export class CodexAdapter extends CodeAgentAdapter {
@@ -10,7 +10,7 @@ export class CodexAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
-        const parts = ['codex', 'exec', '--json', '--skip-git-repo-check']
+        const parts = ['codex', 'exec', '--json', '--ephemeral', '--skip-git-repo-check']
         if (options.cwd) {
             parts.push('-C', quoteShell(options.cwd))
         }
@@ -25,6 +25,22 @@ export class CodexAdapter extends CodeAgentAdapter {
     }
 
     protected parseText(stdout: string, stderr: string) {
-        return parseJsonLines(stdout) || stdout.trim() || stderr.trim()
+        const text = stdout
+            .split(/\r?\n/)
+            .map((line) => {
+                try {
+                    const event = JSON.parse(line)
+                    return event?.type === 'item.completed' &&
+                        event?.item?.type === 'agent_message' &&
+                        typeof event.item.text === 'string'
+                        ? event.item.text
+                        : ''
+                } catch {
+                    return ''
+                }
+            })
+            .filter(Boolean)
+            .join('\n')
+        return text || stdout.trim() || stderr.trim()
     }
 }

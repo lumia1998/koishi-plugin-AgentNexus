@@ -54,10 +54,10 @@ chatluna/packages/extension-agent/src/computer/
 | Agent | 非交互命令 | 备注 |
 |---|---|---|
 | **Hermes** | `hermes chat -Q -q "..."` | 静默 stdout 文本 |
-| **OpenClaw** | `openclaw agent --local --agent default --query "..."` | 用户确认命令 |
+| **OpenClaw** | `openclaw agent --local --agent default --message "..." --json` | JSON 结果 |
 | **Claude Code** | `claude -p "..." --output-format json` | 可加 skip-permissions（需显式开关） |
 | **OpenCode** | `opencode run --format json --auto "..."` | `--auto` 可配置 |
-| **Codex** | `codex exec "..."` | 可加 bypass sandbox（需显式开关） |
+| **Codex** | `codex exec --json --ephemeral "..."` | 可加 bypass sandbox（需显式开关） |
 
 统一执行原则：
 
@@ -282,7 +282,7 @@ npm run build   # scripts/build.cjs → lib/index.js
 2. clone `chatluna`（v1-dev sparse：`packages/extension-agent`）并分析 computer 设计
 3. 调研 hermes / openclaw / claude / opencode / codex 非交互 CLI
 4. 确认 OpenClaw 命令：
-   `openclaw agent --local --agent default --query "..."`
+   `openclaw agent --local --agent default --message "..." --json`
 5. 确认 WebUI 对齐 computer，并加入终端
 6. 落地 P0 骨架：SSH、adapters、tools、skills、service、proxy、WebUI
 7. 完成本文档 `PROJECT.md`
