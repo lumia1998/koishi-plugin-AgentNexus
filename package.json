@@ -81,5 +81,14 @@
     "koishi": "^4.17.0",
     "typescript": "^5.6.0",
     "vue": "^3.5.39"
+  },
+  "allowScripts": {
+    "ssh2": true,
+    "esbuild": true,
+    "vue-demi": true,
+    "@parcel/watcher": true
+  },
+  "overrides": {
+    "langsmith": "^0.6.3"
   }
 }
