@@ -127,6 +127,7 @@ interface TerminalRuntime {
 const props = defineProps<{
     config: NexusConfig
     status: NexusStatus
+    visible?: boolean
 }>()
 
 const tabs = ref<TerminalTab[]>([])
@@ -181,6 +182,19 @@ watch(activeKey, async (key) => {
     fitTab(key)
     syncTabSize(key)
 })
+
+// Re-fit after v-show becomes true (display:none skips fit while hidden).
+watch(
+    () => props.visible,
+    async (visible) => {
+        if (visible === false) return
+        await nextTick()
+        if (activeKey.value) {
+            fitTab(activeKey.value)
+            syncTabSize(activeKey.value)
+        }
+    }
+)
 
 onMounted(() => {
     disposed = false

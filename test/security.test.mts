@@ -652,6 +652,47 @@ test('measures terminal WebSocket messages before parsing', () => {
     assert.equal(terminalMessageSize('你好'), 6)
 })
 
+test('detects hermes outside bare non-interactive PATH', async () => {
+    const adapter = new HermesAdapter()
+    const session = {
+        async exec(command: string) {
+            if (command.includes('found=') || command.includes('command -v')) {
+                return {
+                    exitCode: 0,
+                    stdout: '/home/lumia/.local/bin/hermes\n',
+                    stderr: '',
+                    timedOut: false
+                }
+            }
+            if (command.includes('--version')) {
+                return {
+                    exitCode: 0,
+                    stdout: 'hermes 0.9.0\n',
+                    stderr: '',
+                    timedOut: false
+                }
+            }
+            return { exitCode: 1, stdout: '', stderr: '', timedOut: false }
+        }
+    }
+    const result = await adapter.detect(session as any)
+    assert.equal(result.installed, true)
+    assert.equal(result.path, '/home/lumia/.local/bin/hermes')
+    assert.equal(result.version, 'hermes 0.9.0')
+})
+
+test('reports hermes missing when no candidate path exists', async () => {
+    const adapter = new HermesAdapter()
+    const session = {
+        async exec() {
+            return { exitCode: 1, stdout: '\n', stderr: '', timedOut: false }
+        }
+    }
+    const result = await adapter.detect(session as any)
+    assert.equal(result.installed, false)
+    assert.equal(result.path, undefined)
+})
+
 test('shares an in-flight SFTP initialization', async () => {
     const session = sshSession()
     const wrapper = new EventEmitter() as any

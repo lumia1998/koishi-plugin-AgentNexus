@@ -24,16 +24,17 @@ export abstract class CodeAgentAdapter {
 
     async detect(session: SshSession) {
         for (const bin of this.binNames) {
-            const which = await session.exec(
-                `command -v ${bin} 2>/dev/null || which ${bin} 2>/dev/null`,
+            if (!/^[A-Za-z0-9._+-]+$/.test(bin)) continue
+            const which = await session.exec(buildDetectCommand(bin), {
+                timeoutMs: 12000
+            })
+            const path = pickExecutablePath(which.stdout)
+            if (!path) continue
+
+            const ver = await session.exec(
+                `${shellQuote(path)} --version 2>/dev/null | head -n 1`,
                 { timeoutMs: 8000 }
             )
-            const path = which.stdout.trim().split('\n')[0]
-            if (!path || which.exitCode !== 0) continue
-
-            const ver = await session.exec(`${bin} --version 2>/dev/null | head -n 1`, {
-                timeoutMs: 8000
-            })
             return {
                 kind: this.kind,
                 installed: true,
@@ -151,6 +152,60 @@ function isLocalPath(value: string) {
         !/^https?:\/\//i.test(value) &&
         (value.startsWith('/') || value.startsWith('./') || value.startsWith('~/'))
     )
+}
+
+function shellQuote(value: string) {
+    return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/** Prefer login PATH + common user install locations for CLI tools like hermes. */
+function buildDetectCommand(bin: string) {
+    const q = shellQuote(bin)
+    return [
+        `bin=${q};`,
+        `found="";`,
+        // 1) current PATH (already enriched by SSH session)
+        `found=$(command -v "$bin" 2>/dev/null || true);`,
+        // 2) login/profile PATH (nvm, pyenv, user bins often missing in non-interactive shells)
+        `if [ -z "$found" ]; then`,
+        `  found=$(bash -lc 'command -v '"$bin"' 2>/dev/null' 2>/dev/null || true);`,
+        `fi;`,
+        // 3) well-known install prefixes
+        `if [ -z "$found" ]; then`,
+        `  for d in`,
+        `    "$HOME/.local/bin"`,
+        `    "$HOME/.hermes/bin"`,
+        `    "$HOME/.cargo/bin"`,
+        `    "$HOME/.npm-global/bin"`,
+        `    "$HOME/go/bin"`,
+        `    "$HOME/.opencode/bin"`,
+        `    "$HOME/.claude/bin"`,
+        `    "$HOME/.codex/bin"`,
+        `    "$HOME/bin"`,
+        `    /usr/local/bin`,
+        `    /opt/homebrew/bin`,
+        `    /home/linuxbrew/.linuxbrew/bin;`,
+        `  do`,
+        `    if [ -x "$d/$bin" ]; then found="$d/$bin"; break; fi;`,
+        `  done;`,
+        `fi;`,
+        // 4) python user scripts / pipx
+        `if [ -z "$found" ]; then`,
+        `  for d in "$HOME/.local/pipx/venvs"/*"/bin" "$HOME/.pyenv/shims"; do`,
+        `    if [ -x "$d/$bin" ]; then found="$d/$bin"; break; fi;`,
+        `  done;`,
+        `fi;`,
+        `printf '%s\\n' "$found"`
+    ].join(' ')
+}
+
+function pickExecutablePath(stdout: string) {
+    for (const line of stdout.split(/\r?\n/)) {
+        const value = line.trim()
+        if (!value) continue
+        if (value.startsWith('/') || value.startsWith('~/')) return value
+    }
+    return ''
 }
 
 export function parseJsonLines(text: string) {

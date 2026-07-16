@@ -59,16 +59,18 @@
                 @remove="removeComputer"
             />
             <skills-panel
-                v-else-if="active === 'skills'"
+                v-if="active === 'skills'"
                 :config="config"
                 :status="status"
                 @sync="syncSkill"
                 @refresh="refreshSkills"
             />
+            <!-- Keep terminal mounted so tabs/WebSocket survive Computer/Skills switches. -->
             <terminal-panel
-                v-else
+                v-show="active === 'terminal'"
                 :config="config"
                 :status="status"
+                :visible="active === 'terminal'"
             />
         </div>
     </div>

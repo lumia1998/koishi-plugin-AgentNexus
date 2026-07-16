@@ -99,17 +99,14 @@ export class SshSession {
                     this.lastError = undefined
                     this.lastConnectedAt = Date.now()
                     this.touch()
-                    this.rawExec(
-                        `bash -lc 'printf "%s\\n%s" "$HOME" "$PATH"'`,
-                        10000,
-                        undefined,
-                        client
-                    )
+                    this.rawExec(PROBE_ENV_COMMAND, 10000, undefined, client)
                         .then((result) => {
                             if (!isCurrent()) return reject(new Error('SSH connection superseded'))
-                            const [home, path] = result.stdout.trim().split('\n')
-                            this.home = home || '~'
-                            this.path = path || this.path
+                            const lines = result.stdout.trim().split('\n')
+                            const home = lines[0] || '~'
+                            const path = lines[1] || this.path
+                            this.home = home
+                            this.path = enrichPath(path, home)
                             resolve()
                         })
                         .catch((err) => {
@@ -460,4 +457,49 @@ function shellPath(path: string) {
 
 function errorMessage(err: unknown) {
     return err instanceof Error ? err.message : String(err)
+}
+
+/** Login-ish env probe: many CLIs live only in interactive profile PATH. */
+const PROBE_ENV_COMMAND = [
+    `bash -lc '`,
+    `for f in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do`,
+    `  [ -f "$f" ] && . "$f" >/dev/null 2>&1 || true;`,
+    `done;`,
+    `printf "%s\\n%s" "$HOME" "$PATH"`,
+    `'`
+].join(' ')
+
+const EXTRA_PATH_DIRS = [
+    '.local/bin',
+    '.hermes/bin',
+    '.cargo/bin',
+    '.npm-global/bin',
+    'go/bin',
+    '.opencode/bin',
+    '.claude/bin',
+    '.codex/bin',
+    'bin'
+]
+
+function enrichPath(pathValue: string, home: string) {
+    const parts = pathValue
+        .split(':')
+        .map((item) => item.trim())
+        .filter(Boolean)
+    const seen = new Set(parts)
+    for (const rel of EXTRA_PATH_DIRS) {
+        const dir = home === '~' ? `~/${rel}` : `${home.replace(/\/$/, '')}/${rel}`
+        if (!seen.has(dir)) {
+            parts.unshift(dir)
+            seen.add(dir)
+        }
+    }
+    // Keep system defaults last so user bins win.
+    for (const dir of ['/usr/local/bin', '/usr/bin', '/bin']) {
+        if (!seen.has(dir)) {
+            parts.push(dir)
+            seen.add(dir)
+        }
+    }
+    return parts.join(':')
 }
