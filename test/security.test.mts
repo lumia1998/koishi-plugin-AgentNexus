@@ -30,7 +30,14 @@ import { createId } from '../client/utils/id.ts'
 import { splitMessage } from '../src/utils/text.ts'
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
+import {
+    enrichPath,
+    filterRemoteEnvironment,
+    parseEnvironmentProbe
+} from '../src/ssh/session.ts'
 import { terminalMessageSize } from '../src/proxy.ts'
+import { NexusListAgentsTool } from '../src/tools/list_agents.ts'
+import { SftpFileManager } from '../src/files/manager.ts'
 
 test('creates UUIDs without crypto.randomUUID for LAN HTTP consoles', () => {
     const id = createId({
@@ -76,6 +83,7 @@ test('only allows publishing files below the remote root', () => {
     assert.equal(isRemotePathWithinRoot('/home/agent/out/a.png', '/home/agent/out'), true)
     assert.equal(isRemotePathWithinRoot('/home/agent/out/../.ssh/id_rsa', '/home/agent/out'), false)
     assert.equal(isRemotePathWithinRoot('/etc/passwd', '/home/agent'), false)
+    assert.equal(isRemotePathWithinRoot('/etc/passwd', '/'), true)
 })
 
 test('quotes remote paths before canonicalization', () => {
@@ -464,6 +472,37 @@ test('resolves SSH hosts by ID, address, name, and connection target', () => {
     assert.equal(resolveHostReference(hosts, 'lumia@10.1.2.50:22')?.id, 'host-50')
 })
 
+test('list agents accepts a device name instead of filtering only by host id', async () => {
+    const status = {
+        enabled: true,
+        defaultHostId: 'host-computer',
+        hosts: [
+            {
+                id: 'host-computer',
+                name: 'computer',
+                host: 'lumia@10.1.2.50:22',
+                state: 'connected' as const,
+                agents: [],
+                sessionCount: 1
+            }
+        ],
+        skills: { total: 0, items: [] },
+        activeSessions: 0
+    }
+    const tool = new NexusListAgentsTool({
+        resolveHostId(reference: string) {
+            assert.equal(reference, 'computer')
+            return 'host-computer'
+        },
+        getStatus() {
+            return status
+        }
+    } as any)
+    const output = await tool._call({ hostId: 'computer' })
+    assert.match(output, /name: computer/)
+    assert.doesNotMatch(output, /No hosts configured/)
+})
+
 test('rejects ambiguous SSH host addresses', () => {
     const hosts = ['first', 'second'].map((id) => ({
         id,
@@ -707,4 +746,64 @@ test('shares an in-flight SFTP initialization', async () => {
     assert.equal(calls, 1)
     assert.equal(first, wrapper)
     assert.equal(second, wrapper)
+})
+
+test('parses interactive SSH environment markers and removes volatile variables', () => {
+    const begin = '__BEGIN__'
+    const end = '__END__'
+    const parsed = parseEnvironmentProbe(
+        `banner\r\n${begin}\r\nHOME=/home/lumia\r\nPATH=/custom/bin:/usr/bin\r\nSHELL=/bin/zsh\r\nOPENAI_API_KEY=secret\r\n${end}\r\n`,
+        begin,
+        end
+    )
+    const filtered = filterRemoteEnvironment(parsed)
+    assert.equal(filtered.HOME, '/home/lumia')
+    assert.equal(filtered.SHELL, '/bin/zsh')
+    assert.equal(filtered.OPENAI_API_KEY, undefined)
+    const pathValue = enrichPath('~/.local/bin:/usr/bin', '/home/lumia')
+    assert.doesNotMatch(pathValue, /~/)
+    assert.equal(pathValue.split(':')[0], '/home/lumia/.local/bin')
+})
+
+test('SFTP file manager confines paths to the configured remote root', async () => {
+    const directoryStats = {
+        size: 0,
+        mode: 0o40755,
+        mtime: 1,
+        isDirectory: () => true,
+        isFile: () => false,
+        isSymbolicLink: () => false
+    }
+    const fakeSession = {
+        cwd: '/home/lumia/work',
+        resolveRemotePath(value: string) {
+            return value
+        },
+        async realpath(value: string) {
+            return value.replace('/home/lumia/work/../..', '')
+        },
+        async stat() {
+            return directoryStats
+        },
+        async listDirectory() {
+            return []
+        }
+    }
+    const manager = await SftpFileManager.create(
+        fakeSession as any,
+        'host-computer',
+        '/home/lumia/work',
+        { maxUploadBytes: 1024, maxPreviewBytes: 128 }
+    )
+    const listing = await manager.list()
+    assert.equal(listing.root, '/home/lumia/work')
+    await assert.rejects(
+        manager.preview('/home/lumia/work/../../etc/passwd'),
+        /超出文件管理根目录/
+    )
+    await assert.rejects(
+        manager.createDirectory('/home/lumia/work', 'trailing '),
+        /文件名无效/
+    )
+    await assert.rejects(manager.remove('/home/lumia/work'), /不能修改或删除/)
 })

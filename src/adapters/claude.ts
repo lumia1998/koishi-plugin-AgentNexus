@@ -11,7 +11,7 @@ export class ClaudeAdapter extends CodeAgentAdapter {
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
         const parts = [
-            'claude',
+            this.executable(options, 'claude'),
             '-p',
             promptExpr,
             '--output-format',

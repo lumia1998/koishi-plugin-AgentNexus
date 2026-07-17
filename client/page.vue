@@ -9,11 +9,11 @@
                     </el-tag>
                 </div>
                 <div class="subtitle">
-                    SSH Code Agent 网关 · 扫描远端 Agent · 同步 Skills · 终端调试
+                    SSH Code Agent 网关 · 扫描远端 Agent · SFTP 文件管理 · 终端调试
                 </div>
             </div>
             <div class="actions">
-                <el-button size="small" :loading="loading" @click="reload">刷新状态</el-button>
+                <el-button size="small" :loading="loading" @click="reload(true)">刷新并重扫</el-button>
             </div>
         </div>
 
@@ -65,6 +65,12 @@
                 @sync="syncSkill"
                 @refresh="refreshSkills"
             />
+            <file-manager-panel
+                v-show="active === 'files'"
+                :config="config"
+                :status="status"
+                :visible="active === 'files'"
+            />
             <!-- Keep terminal mounted so tabs/WebSocket survive Computer/Skills switches. -->
             <terminal-panel
                 v-show="active === 'terminal'"
@@ -83,6 +89,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import ComputerPanel from './components/computer-panel.vue'
 import SkillsPanel from './components/skills-panel.vue'
 import TerminalPanel from './components/terminal-panel.vue'
+import FileManagerPanel from './components/file-manager-panel.vue'
 import type { NexusConfig, NexusStatus, SshAuth } from '../src/types'
 
 type ComputerConnectInput = {
@@ -96,10 +103,11 @@ type ComputerConnectInput = {
     setAsDefault?: boolean
 }
 
-const tabs = ['computer', 'skills', 'terminal'] as const
+const tabs = ['computer', 'skills', 'files', 'terminal'] as const
 const tabLabel = {
     computer: 'Computer',
     skills: 'Skills',
+    files: '文件',
     terminal: '终端'
 }
 
@@ -154,12 +162,15 @@ const overview = computed(() => {
     }
 })
 
-async function reload() {
+async function reload(scan = false) {
     loading.value = true
     try {
         const data = await send('agent-nexus/getConsoleData')
         config.value = data.config
         status.value = data.status
+        if (scan && data.config.hosts.some((host) => host.enabled)) {
+            status.value = await send('agent-nexus/scanAgents')
+        }
     } catch (err: any) {
         ElMessage.error(err?.message || String(err))
     } finally {
@@ -176,7 +187,7 @@ async function autoConnectAndScan() {
 
     const hostStatus = status.value.hosts.find((item) => item.id === hostId)
     const hasAgents = (hostStatus?.agents || []).some((agent) => agent.installed)
-    if (hostStatus && (hostStatus.state === 'connected' || hasAgents)) return
+    if (hostStatus && hasAgents) return
 
     // Do not toggle the main connecting flag — that freezes the Computer UI.
     try {
@@ -300,7 +311,7 @@ async function refreshSkills(hostId?: string) {
 }
 
 onMounted(async () => {
-    await reload()
+    await reload(false)
     await autoConnectAndScan()
 })
 </script>

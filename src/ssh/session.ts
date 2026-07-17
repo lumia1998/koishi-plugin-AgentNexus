@@ -1,6 +1,14 @@
-import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2'
+import {
+    Client,
+    type ClientChannel,
+    type ExecOptions,
+    type FileEntryWithStats,
+    type SFTPWrapper,
+    type Stats
+} from 'ssh2'
 import { randomUUID } from 'crypto'
 import { Readable } from 'stream'
+import path from 'path'
 import type { ExecResult, SshHostConfig } from '../types'
 import { resolveSecret } from '../utils/shell'
 import { mimeType } from '../utils/mime'
@@ -14,13 +22,23 @@ export interface TerminalHandle {
     kill(): void
 }
 
+interface EnvironmentProbe {
+    env: Record<string, string>
+    source: 'interactive' | 'noninteractive' | 'fallback'
+    warning?: string
+}
+
 export class SshSession {
     readonly sessionId = randomUUID()
     readonly hostId: string
     private client = new Client()
     private connected = false
-    private home = '~'
+    private home: string
     private path = '/usr/local/bin:/usr/bin:/bin'
+    private remoteEnvironment: Record<string, string> = {}
+    private environmentSource: 'interactive' | 'noninteractive' | 'fallback' =
+        'fallback'
+    private environmentWarning?: string
     private sftp?: SFTPWrapper
     private connecting?: Promise<void>
     private cancelConnecting?: (error: Error) => void
@@ -36,10 +54,32 @@ export class SshSession {
         private readonly maxOutputBytes = 4 * 1024 * 1024
     ) {
         this.hostId = host.id
+        this.home = defaultRemoteHome(host.username)
     }
 
     get cwd() {
-        return this.host.cwd || this.home
+        return this.resolveRemotePath(this.host.cwd || this.home)
+    }
+
+    get environmentInfo() {
+        return {
+            source: this.environmentSource,
+            home: this.home,
+            shell: this.remoteEnvironment.SHELL,
+            pathEntries: this.path.split(':').filter(Boolean).length,
+            variables: Object.keys(this.remoteEnvironment).length,
+            warning: this.environmentWarning
+        }
+    }
+
+    resolveRemotePath(value?: string) {
+        const input = value?.trim() || this.home
+        if (input === '~') return this.home
+        if (input.startsWith('~/')) {
+            return path.posix.normalize(`${this.home}/${input.slice(2)}`)
+        }
+        if (input.startsWith('/')) return path.posix.normalize(input)
+        return path.posix.resolve(this.home, input)
     }
 
     isConnected() {
@@ -99,14 +139,22 @@ export class SshSession {
                     this.lastError = undefined
                     this.lastConnectedAt = Date.now()
                     this.touch()
-                    this.rawExec(PROBE_ENV_COMMAND, 10000, undefined, client)
-                        .then((result) => {
+                    this.probeEnvironment(client)
+                        .then((probe) => {
                             if (!isCurrent()) return reject(new Error('SSH connection superseded'))
-                            const lines = result.stdout.trim().split('\n')
-                            const home = lines[0] || '~'
-                            const path = lines[1] || this.path
-                            this.home = home
-                            this.path = enrichPath(path, home)
+                            this.remoteEnvironment = filterRemoteEnvironment(probe.env)
+                            this.environmentSource = probe.source
+                            this.environmentWarning = probe.warning
+                            this.home = absoluteHome(
+                                this.remoteEnvironment.HOME,
+                                this.host.username
+                            )
+                            this.path = enrichPath(
+                                this.remoteEnvironment.PATH || this.path,
+                                this.home
+                            )
+                            this.remoteEnvironment.HOME = this.home
+                            this.remoteEnvironment.PATH = this.path
                             resolve()
                         })
                         .catch((err) => {
@@ -170,19 +218,15 @@ export class SshSession {
         await this.connect()
         this.touch()
 
-        const cwd = options.cwd || this.cwd
+        const cwd = this.resolveRemotePath(options.cwd || this.cwd)
         const timeoutMs = options.timeoutMs ?? 120000
-        const envPrefix = options.env
-            ? Object.entries(options.env)
-                  .map(([k, v]) => {
-                      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-                          throw new Error(`Invalid environment variable name: ${k}`)
-                      }
-                      return `export ${k}=${shellPath(v)};`
-                  })
-                  .join(' ')
-            : ''
-        const wrapped = `export PATH=${shellPath(this.path)}; cd ${shellPath(cwd)} 2>/dev/null || cd; ${envPrefix}${command}`
+        const envPrefix = buildEnvironmentExports({
+            ...this.remoteEnvironment,
+            HOME: this.home,
+            PATH: this.path,
+            ...options.env
+        })
+        const wrapped = `${envPrefix}cd ${shellPath(cwd)} 2>/dev/null || cd ${shellPath(this.home)}; ${command}`
         return this.rawExec(wrapped, timeoutMs, options.signal, this.client)
     }
 
@@ -190,7 +234,8 @@ export class SshSession {
         command: string,
         timeoutMs: number,
         abortSignal?: AbortSignal,
-        client = this.client
+        client = this.client,
+        execOptions?: ExecOptions
     ): Promise<ExecResult> {
         this.activeOperations += 1
         return new Promise((resolve, reject) => {
@@ -244,7 +289,7 @@ export class SshSession {
                 return current + chunk.toString('utf8')
             }
 
-            client.exec(command, (err, ch) => {
+            const callback = (err: Error | undefined, ch: ClientChannel) => {
                 if (settled) {
                     try {
                         ch?.signal('KILL')
@@ -270,8 +315,76 @@ export class SshSession {
                 ch.on('close', (code: number, signal: string) => {
                     finish(code ?? 0, signal)
                 })
-            })
+            }
+            if (execOptions) client.exec(command, execOptions, callback)
+            else client.exec(command, callback)
         })
+    }
+
+    private async probeEnvironment(client: Client): Promise<EnvironmentProbe> {
+        let baseline: Record<string, string> = {}
+        let baselineError: unknown
+        try {
+            const result = await this.rawExec('env', 8000, undefined, client)
+            baseline = parseEnvironmentBlock(result.stdout)
+            if (!Object.keys(baseline).length) {
+                throw new Error(result.stderr.trim() || 'environment probe returned no variables')
+            }
+        } catch (err) {
+            baselineError = err
+        }
+
+        const token = randomUUID().replaceAll('-', '')
+        const begin = `__AGENT_NEXUS_ENV_${token}_BEGIN__`
+        const end = `__AGENT_NEXUS_ENV_${token}_END__`
+        const script = [
+            `printf '\\n${begin}\\n'`,
+            `printf 'HOME=%s\\n' "$HOME"`,
+            `printf 'PATH=%s\\n' "$PATH"`,
+            `printf 'SHELL=%s\\n' "$SHELL"`,
+            `printf 'LANG=%s\\n' "$LANG"`,
+            `printf 'LC_ALL=%s\\n' "$LC_ALL"`,
+            `printf 'XDG_CONFIG_HOME=%s\\n' "$XDG_CONFIG_HOME"`,
+            `printf 'XDG_DATA_HOME=%s\\n' "$XDG_DATA_HOME"`,
+            `printf 'XDG_CACHE_HOME=%s\\n' "$XDG_CACHE_HOME"`,
+            `printf 'XDG_RUNTIME_DIR=%s\\n' "$XDG_RUNTIME_DIR"`,
+            `printf '${end}\\n'`
+        ].join('; ')
+        const shell = baseline.SHELL?.startsWith('/') ? baseline.SHELL : '/bin/sh'
+        const command = `${shellPath(shell)} -lic ${shellPath(script)}`
+
+        try {
+            const result = await this.rawExec(command, 10000, undefined, client, {
+                pty: { term: 'xterm-256color', cols: 80, rows: 24 }
+            })
+            const env = parseEnvironmentProbe(result.stdout, begin, end)
+            if (
+                !result.timedOut &&
+                result.exitCode === 0 &&
+                env.HOME?.startsWith('/') &&
+                env.PATH
+            ) {
+                return { env: { ...baseline, ...env }, source: 'interactive' }
+            }
+            throw new Error(result.stderr.trim() || 'interactive environment probe returned no variables')
+        } catch (interactiveError) {
+            if (Object.keys(baseline).length) {
+                return {
+                    env: baseline,
+                    source: 'noninteractive',
+                    warning: `登录环境探测失败，已回退到 SSH 基础环境：${errorMessage(interactiveError)}`
+                }
+            }
+            return {
+                env: {
+                    HOME: defaultRemoteHome(this.host.username),
+                    PATH: this.path,
+                    SHELL: '/bin/sh'
+                },
+                source: 'fallback',
+                warning: `远端环境探测失败：${errorMessage(baselineError || interactiveError)}`
+            }
+        }
     }
 
     async getSftp(): Promise<SFTPWrapper> {
@@ -301,15 +414,164 @@ export class SshSession {
         return this.sftpConnecting
     }
 
-    async readFile(remotePath: string): Promise<Buffer> {
+    async realpath(remotePath: string): Promise<string> {
         const sftp = await this.getSftp()
+        return this.trackOperation(
+            () =>
+                new Promise((resolve, reject) => {
+                    sftp.realpath(remotePath, (err, value) => {
+                        if (err) reject(err)
+                        else resolve(value)
+                    })
+                })
+        )
+    }
+
+    async stat(remotePath: string, followSymlink = true): Promise<Stats> {
+        const sftp = await this.getSftp()
+        return this.trackOperation(
+            () =>
+                new Promise((resolve, reject) => {
+                    const callback = (err: Error | undefined, value: Stats) => {
+                        if (err) reject(err)
+                        else resolve(value)
+                    }
+                    if (followSymlink) sftp.stat(remotePath, callback)
+                    else sftp.lstat(remotePath, callback)
+                })
+        )
+    }
+
+    async listDirectory(remotePath: string): Promise<FileEntryWithStats[]> {
+        const sftp = await this.getSftp()
+        return this.trackOperation(
+            () =>
+                new Promise((resolve, reject) => {
+                    sftp.readdir(remotePath, (err, entries) => {
+                        if (err) reject(err)
+                        else resolve(entries)
+                    })
+                })
+        )
+    }
+
+    async readFile(remotePath: string, maxBytes?: number): Promise<Buffer> {
+        const sftp = await this.getSftp()
+        return this.trackOperation(
+            () =>
+                new Promise((resolve, reject) => {
+                    if (!maxBytes) {
+                        sftp.readFile(remotePath, (err, data) => {
+                            if (err) reject(err)
+                            else resolve(data)
+                        })
+                        return
+                    }
+                    const chunks: Buffer[] = []
+                    const stream = sftp.createReadStream(remotePath, {
+                        start: 0,
+                        end: Math.max(0, maxBytes - 1)
+                    })
+                    stream.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)))
+                    stream.on('error', reject)
+                    stream.on('end', () => resolve(Buffer.concat(chunks)))
+                })
+        )
+    }
+
+    async makeDirectory(remotePath: string): Promise<void> {
+        const sftp = await this.getSftp()
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.mkdir(remotePath, (err) => {
+                        if (err) reject(err)
+                        else resolve()
+                    })
+                })
+        )
+    }
+
+    async rename(remotePath: string, targetPath: string): Promise<void> {
+        const sftp = await this.getSftp()
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.rename(remotePath, targetPath, (err) => {
+                        if (err) reject(err)
+                        else resolve()
+                    })
+                })
+        )
+    }
+
+    async replaceFile(remotePath: string, targetPath: string): Promise<void> {
+        const sftp = await this.getSftp()
+        try {
+            await this.trackOperation(
+                () =>
+                    new Promise<void>((resolve, reject) => {
+                        sftp.ext_openssh_rename(remotePath, targetPath, (err) => {
+                            if (err) reject(err)
+                            else resolve()
+                        })
+                    })
+            )
+            return
+        } catch (err: any) {
+            if (err?.code !== 8 && !/unsupported/i.test(err?.message || '')) {
+                throw err
+            }
+            if (await this.pathExists(targetPath)) await this.unlink(targetPath)
+            await this.rename(remotePath, targetPath)
+        }
+    }
+
+    async unlink(remotePath: string): Promise<void> {
+        const sftp = await this.getSftp()
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.unlink(remotePath, (err) => {
+                        if (err) reject(err)
+                        else resolve()
+                    })
+                })
+        )
+    }
+
+    async removeDirectory(remotePath: string): Promise<void> {
+        const sftp = await this.getSftp()
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.rmdir(remotePath, (err) => {
+                        if (err) reject(err)
+                        else resolve()
+                    })
+                })
+        )
+    }
+
+    async pathExists(remotePath: string): Promise<boolean> {
+        try {
+            await this.stat(remotePath, false)
+            return true
+        } catch (err: any) {
+            if (err?.code === 2 || /no such file/i.test(err?.message || '')) return false
+            throw err
+        }
+    }
+
+    private async trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+        this.activeOperations += 1
         this.touch()
-        return new Promise((resolve, reject) => {
-            sftp.readFile(remotePath, (err, data) => {
-                if (err) reject(err)
-                else resolve(data)
-            })
-        })
+        try {
+            return await operation()
+        } finally {
+            this.activeOperations -= 1
+            this.touch()
+        }
     }
 
     async openAsset(remotePath: string): Promise<{
@@ -318,14 +580,20 @@ export class SshSession {
         mimeType?: string
     }> {
         const sftp = await this.getSftp()
-        this.touch()
-        const stat = await new Promise<{ size: number }>((resolve, reject) => {
-            sftp.stat(remotePath, (err, stats) => {
-                if (err) reject(err)
-                else resolve({ size: stats.size })
-            })
-        })
+        const stat = await this.stat(remotePath)
         const stream = sftp.createReadStream(remotePath)
+        this.activeOperations += 1
+        this.touch()
+        let released = false
+        const release = () => {
+            if (released) return
+            released = true
+            this.activeOperations -= 1
+            this.touch()
+        }
+        stream.once('end', release)
+        stream.once('close', release)
+        stream.once('error', release)
         return {
             stream: stream as unknown as Readable,
             size: stat.size,
@@ -335,14 +603,38 @@ export class SshSession {
 
     async writeFile(remotePath: string, content: Buffer | string): Promise<void> {
         const sftp = await this.getSftp()
-        this.touch()
         const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
-        await new Promise<void>((resolve, reject) => {
-            sftp.writeFile(remotePath, buf, (err) => {
-                if (err) reject(err)
-                else resolve()
-            })
-        })
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.writeFile(remotePath, buf, (err) => {
+                        if (err) reject(err)
+                        else resolve()
+                    })
+                })
+        )
+    }
+
+    async writeFileExclusive(
+        remotePath: string,
+        content: Buffer | string
+    ): Promise<void> {
+        const sftp = await this.getSftp()
+        const buf = typeof content === 'string' ? Buffer.from(content, 'utf8') : content
+        await this.trackOperation(
+            () =>
+                new Promise<void>((resolve, reject) => {
+                    sftp.writeFile(
+                        remotePath,
+                        buf,
+                        { flag: 'wx', mode: 0o600 },
+                        (err) => {
+                            if (err) reject(err)
+                            else resolve()
+                        }
+                    )
+                })
+        )
     }
 
     async createTerminal(options: {
@@ -459,15 +751,61 @@ function errorMessage(err: unknown) {
     return err instanceof Error ? err.message : String(err)
 }
 
-/** Login-ish env probe: many CLIs live only in interactive profile PATH. */
-const PROBE_ENV_COMMAND = [
-    `bash -lc '`,
-    `for f in "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do`,
-    `  [ -f "$f" ] && . "$f" >/dev/null 2>&1 || true;`,
-    `done;`,
-    `printf "%s\\n%s" "$HOME" "$PATH"`,
-    `'`
-].join(' ')
+export function parseEnvironmentProbe(stdout: string, begin: string, end: string) {
+    const start = stdout.indexOf(begin)
+    if (start < 0) return {}
+    const finish = stdout.indexOf(end, start + begin.length)
+    if (finish < 0) return {}
+    return parseEnvironmentBlock(
+        stdout
+            .slice(start + begin.length, finish)
+            .replace(/^[\r\n]+|[\r\n]+$/g, '')
+    )
+}
+
+export function parseEnvironmentBlock(value: string) {
+    const env: Record<string, string> = {}
+    for (const item of value.split(/\0|\r?\n/)) {
+        const normalized = item.replace(/^[\r\n]+/, '')
+        const index = normalized.indexOf('=')
+        if (index < 1) continue
+        const key = normalized.slice(0, index)
+        if (!ENV_NAME.test(key)) continue
+        env[key] = normalized.slice(index + 1)
+    }
+    return env
+}
+
+export function filterRemoteEnvironment(input: Record<string, string>) {
+    const output: Record<string, string> = {}
+    for (const [key, value] of Object.entries(input)) {
+        if (!ENV_NAME.test(key) || !isAllowedEnvironmentKey(key)) {
+            continue
+        }
+        if (typeof value !== 'string' || value.length > 16384) continue
+        output[key] = value
+    }
+    return output
+}
+
+function buildEnvironmentExports(env: Record<string, string>) {
+    return Object.entries(env)
+        .map(([key, value]) => {
+            if (!ENV_NAME.test(key)) {
+                throw new Error(`Invalid environment variable name: ${key}`)
+            }
+            return `export ${key}=${shellPath(value)}; `
+        })
+        .join('')
+}
+
+function absoluteHome(value: string | undefined, username: string) {
+    return value?.startsWith('/') ? path.posix.normalize(value) : defaultRemoteHome(username)
+}
+
+function defaultRemoteHome(username: string) {
+    return username === 'root' ? '/root' : `/home/${username}`
+}
 
 const EXTRA_PATH_DIRS = [
     '.local/bin',
@@ -481,16 +819,30 @@ const EXTRA_PATH_DIRS = [
     'bin'
 ]
 
-function enrichPath(pathValue: string, home: string) {
-    const parts = pathValue
+export function enrichPath(pathValue: string, home: string) {
+    const current = pathValue
         .split(':')
         .map((item) => item.trim())
         .filter(Boolean)
-    const seen = new Set(parts)
+        .map((item) =>
+            item === '~'
+                ? home
+                : item.startsWith('~/')
+                  ? `${home}/${item.slice(2)}`
+                  : item
+        )
+    const parts: string[] = []
+    const seen = new Set<string>()
     for (const rel of EXTRA_PATH_DIRS) {
-        const dir = home === '~' ? `~/${rel}` : `${home.replace(/\/$/, '')}/${rel}`
+        const dir = `${home.replace(/\/$/, '')}/${rel}`
         if (!seen.has(dir)) {
-            parts.unshift(dir)
+            parts.push(dir)
+            seen.add(dir)
+        }
+    }
+    for (const dir of current) {
+        if (!seen.has(dir)) {
+            parts.push(dir)
             seen.add(dir)
         }
     }
@@ -502,4 +854,22 @@ function enrichPath(pathValue: string, home: string) {
         }
     }
     return parts.join(':')
+}
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+const ENV_ALLOW = new Set([
+    'HOME',
+    'PATH',
+    'SHELL',
+    'LANG',
+    'LANGUAGE',
+    'LC_ALL',
+    'XDG_CONFIG_HOME',
+    'XDG_DATA_HOME',
+    'XDG_CACHE_HOME',
+    'XDG_RUNTIME_DIR'
+])
+
+function isAllowedEnvironmentKey(key: string) {
+    return ENV_ALLOW.has(key) || key.startsWith('LC_')
 }

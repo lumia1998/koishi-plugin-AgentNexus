@@ -153,6 +153,24 @@
                 <div class="section-meta">{{ availableCount }}/{{ kinds.length }} 可用</div>
             </div>
 
+            <div v-if="hostStatus?.environment" class="environment-summary">
+                <span>
+                    环境：{{ environmentLabel }} ·
+                    {{ hostStatus.environment.shell || '默认 shell' }} ·
+                    {{ hostStatus.environment.pathEntries }} 个 PATH 目录
+                </span>
+                <el-tag
+                    size="small"
+                    effect="plain"
+                    :type="hostStatus.environment.source === 'interactive' ? 'success' : 'warning'"
+                >
+                    {{ hostStatus.environment.source === 'interactive' ? '交互环境已同步' : '环境已降级' }}
+                </el-tag>
+            </div>
+            <div v-if="hostStatus?.environment?.warning" class="environment-warning">
+                {{ hostStatus.environment.warning }}
+            </div>
+
             <div class="agent-grid">
                 <div
                     v-for="kind in kinds"
@@ -284,6 +302,11 @@ const statusTagType = computed(() => {
     if (hostStatus.value?.state === 'connected') return 'success'
     if (hostStatus.value?.state === 'error') return 'danger'
     return 'info'
+})
+const environmentLabel = computed(() => {
+    if (hostStatus.value?.environment?.source === 'interactive') return 'interactive'
+    if (hostStatus.value?.environment?.source === 'noninteractive') return 'non-interactive fallback'
+    return 'fallback'
 })
 
 function agent(kind: AgentKind) {
@@ -605,6 +628,29 @@ function connect() {
 
 .scan-hint {
     margin-top: 14px;
+}
+
+.environment-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--k-page-bg), transparent 28%);
+    color: var(--k-text-light);
+    font-size: 12px;
+}
+
+.environment-warning {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--el-color-warning-light-9), transparent 8%);
+    color: var(--el-color-warning-dark-2);
+    font-size: 12px;
+    line-height: 1.5;
 }
 
 @media (max-width: 980px) {

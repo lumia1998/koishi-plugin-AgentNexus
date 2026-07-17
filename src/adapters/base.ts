@@ -16,6 +16,7 @@ export interface DelegateOptions {
     runtime: AgentRuntimeOptions
     sessionMode?: 'oneshot' | 'managed'
     providerState?: AgentProviderState
+    executablePath?: string
 }
 
 export abstract class CodeAgentAdapter {
@@ -29,6 +30,12 @@ export abstract class CodeAgentAdapter {
         options: DelegateOptions
     ): string
 
+    protected executable(options: DelegateOptions, fallback: string) {
+        return options.executablePath
+            ? shellQuote(options.executablePath)
+            : fallback
+    }
+
     async detect(session: SshSession) {
         for (const bin of this.binNames) {
             if (!/^[A-Za-z0-9._+-]+$/.test(bin)) continue
@@ -37,15 +44,18 @@ export abstract class CodeAgentAdapter {
             })
             const path = pickExecutablePath(which.stdout)
             if (!path) continue
+            const executablePath = path.startsWith('~/')
+                ? session.resolveRemotePath(path)
+                : path
 
             const ver = await session.exec(
-                `${shellQuote(path)} --version 2>/dev/null | head -n 1`,
+                `${shellQuote(executablePath)} --version 2>/dev/null | head -n 1`,
                 { timeoutMs: 8000 }
             )
             return {
                 kind: this.kind,
                 installed: true,
-                path,
+                path: executablePath,
                 version: ver.stdout.trim() || undefined,
                 skillDirs: this.skillDirs('~')
             }

@@ -10,7 +10,13 @@ export class CodexAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
-        const parts = ['codex', 'exec', '--json', '--ephemeral', '--skip-git-repo-check']
+        const parts = [
+            this.executable(options, 'codex'),
+            'exec',
+            '--json',
+            '--ephemeral',
+            '--skip-git-repo-check'
+        ]
         if (options.cwd) {
             parts.push('-C', quoteShell(options.cwd))
         }

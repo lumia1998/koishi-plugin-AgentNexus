@@ -56,6 +56,7 @@ import {
     type SessionInvocationContext,
     type SessionRunOutcome
 } from './runtime/runner'
+import { SftpFileManager } from './files/manager'
 
 interface ManagedTerminal {
     terminal: TerminalHandle
@@ -151,6 +152,10 @@ export class AgentNexusService extends Service {
         return redactNexusConfig(this.nexusConfig)
     }
 
+    get commandAuthority() {
+        return this.pluginConfig.commandAuthority
+    }
+
     runInSession(
         identity: SessionIdentity,
         input: DelegateInput,
@@ -186,7 +191,8 @@ export class AgentNexusService extends Service {
     ) {
         const host = this.resolveHost(input.hostId)
         const ssh = await this.pool.getOrCreate(host)
-        const agent = await this.resolveAgent(host, ssh.sessionId, input.agent)
+        const detectedAgent = await this.resolveAgent(host, ssh.sessionId, input.agent)
+        const agent = detectedAgent.kind
         const session = await this.agentRunner.startInteractive(
             identity,
             {
@@ -365,7 +371,8 @@ export class AgentNexusService extends Service {
                 error: host.enabled ? error : 'disabled',
                 agents,
                 sessionCount: this.pool.countByHost(host.id),
-                lastConnectedAt: connected?.lastConnectedAt
+                lastConnectedAt: connected?.lastConnectedAt,
+                environment: connected?.environmentInfo
             }
         })
 
@@ -448,7 +455,18 @@ export class AgentNexusService extends Service {
                         })
                         continue
                     }
-                    detected.push(await adapter.detect(session))
+                    try {
+                        detected.push(await adapter.detect(session))
+                    } catch (err) {
+                        detected.push({
+                            kind: adapter.kind,
+                            installed: false,
+                            skillDirs: adapter.skillDirs('~')
+                        })
+                        this.ctx.logger.warn(
+                            `[agent-nexus] ${host.name}/${adapter.kind} detect failed: ${getErrorMessage(err)}`
+                        )
+                    }
                 }
                 this.agentCache.set(host.id, detected)
                 this.hostErrors.delete(host.id)
@@ -521,8 +539,15 @@ export class AgentNexusService extends Service {
         this.activeByHost.set(host.id, active + 1)
         try {
             const session = await this.pool.getOrCreate(host)
-            const agent = await this.resolveAgent(host, session.sessionId, input.agent)
-            const adapter = getAdapter(agent)
+            const detectedAgent = await this.resolveAgent(
+                host,
+                session.sessionId,
+                input.agent
+            )
+            const adapter = getAdapter(detectedAgent.kind)
+            const executionCwd = session.resolveRemotePath(
+                input.cwd || host.cwd || session.cwd
+            )
 
             const prompt = appendFileHint(input.prompt)
             const timeoutMs =
@@ -532,17 +557,18 @@ export class AgentNexusService extends Service {
 
             const command = adapter.buildCommand({
                 prompt,
-                cwd: input.cwd || host.cwd,
+                cwd: executionCwd,
                 model: input.model,
                 timeoutMs,
                 openclawAgent: input.openclawAgent,
                 runtime: this.nexusConfig.runtime,
                 sessionMode: input.sessionMode,
-                providerState: input.providerState
+                providerState: input.providerState,
+                executablePath: detectedAgent.path
             })
 
             const exec = await session.exec(command, {
-                cwd: input.cwd || host.cwd,
+                cwd: executionCwd,
                 timeoutMs,
                 signal: input.signal
             })
@@ -561,7 +587,7 @@ export class AgentNexusService extends Service {
                 published = await this.publishFiles(
                     result.files,
                     host.id,
-                    input.cwd || host.cwd
+                    executionCwd
                 )
             }
 
@@ -611,6 +637,88 @@ export class AgentNexusService extends Service {
         }
 
         return out
+    }
+
+    async listRemoteFiles(input: { hostId?: string; path?: string } = {}) {
+        const manager = await this.createFileManager(input.hostId)
+        return manager.list(input.path)
+    }
+
+    async previewRemoteFile(input: { hostId?: string; path: string }) {
+        const manager = await this.createFileManager(input.hostId)
+        return manager.preview(input.path)
+    }
+
+    async uploadRemoteFile(input: {
+        hostId?: string
+        path: string
+        contentBase64: string
+    }) {
+        const manager = await this.createFileManager(input.hostId)
+        const remotePath = await manager.writeBase64(
+            input.path,
+            input.contentBase64
+        )
+        return { success: true, path: remotePath }
+    }
+
+    async saveRemoteText(input: {
+        hostId?: string
+        path: string
+        content: string
+    }) {
+        const manager = await this.createFileManager(input.hostId)
+        const remotePath = await manager.writeText(input.path, input.content)
+        return { success: true, path: remotePath }
+    }
+
+    async createRemoteDirectory(input: {
+        hostId?: string
+        parent: string
+        name: string
+    }) {
+        const manager = await this.createFileManager(input.hostId)
+        const remotePath = await manager.createDirectory(input.parent, input.name)
+        return { success: true, path: remotePath }
+    }
+
+    async renameRemoteFile(input: {
+        hostId?: string
+        path: string
+        newName: string
+    }) {
+        const manager = await this.createFileManager(input.hostId)
+        const remotePath = await manager.rename(input.path, input.newName)
+        return { success: true, path: remotePath }
+    }
+
+    async deleteRemoteFile(input: { hostId?: string; path: string }) {
+        const manager = await this.createFileManager(input.hostId)
+        await manager.remove(input.path)
+        return { success: true }
+    }
+
+    async downloadRemoteFile(input: { hostId?: string; path: string }) {
+        const manager = await this.createFileManager(input.hostId)
+        const opened = await manager.openDownload(input.path)
+        const file = await this.ctx.chatluna_storage.createTempFileFromStream(
+            opened.asset.stream,
+            opened.result.name,
+            {
+                size: opened.asset.size,
+                mimeType: opened.asset.mimeType
+            }
+        )
+        return { ...opened.result, url: file.url }
+    }
+
+    private async createFileManager(hostId?: string) {
+        const host = this.resolveHost(hostId)
+        const session = await this.pool.getOrCreate(host)
+        return SftpFileManager.create(session, host.id, host.cwd, {
+            maxUploadBytes: this.pluginConfig.fileManagerMaxUploadBytes,
+            maxPreviewBytes: this.pluginConfig.fileManagerMaxPreviewBytes
+        })
     }
 
     private async resolvePublishRoot(session: SshSession, cwd?: string) {
@@ -779,7 +887,7 @@ export class AgentNexusService extends Service {
         host: SshHostConfig,
         _sessionId: string,
         preferred?: AgentKind | 'auto'
-    ): Promise<AgentKind> {
+    ): Promise<DetectedAgent> {
         let agents = this.agentCache.get(host.id)
         if (!agents?.length) {
             await this.scanAgents(host.id)
@@ -802,7 +910,7 @@ export class AgentNexusService extends Service {
 
         if (want) {
             const hit = installed.find((a) => a.kind === want)
-            if (hit) return hit.kind
+            if (hit) return hit
             throw new Error(`Agent ${want} is not available on host ${host.name}`)
         }
 
@@ -814,9 +922,10 @@ export class AgentNexusService extends Service {
             'codex'
         ]
         for (const kind of order) {
-            if (installed.some((a) => a.kind === kind)) return kind
+            const hit = installed.find((a) => a.kind === kind)
+            if (hit) return hit
         }
-        return installed[0].kind
+        return installed[0]
     }
 
     private installedAgentKinds(hostId: string): AgentKind[] {
@@ -867,6 +976,10 @@ export class AgentNexusService extends Service {
             this.nexusConfig.hosts[0]?.id
         if (!id) throw new Error('还没有可用的 SSH 设备，请先在 Computer 页面添加。')
         return this.requireHost(id)
+    }
+
+    resolveHostId(reference: string) {
+        return this.requireHost(reference).id
     }
 
     private requireHost(hostId: string) {

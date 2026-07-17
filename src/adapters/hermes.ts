@@ -10,14 +10,15 @@ export class HermesAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
+        const executable = this.executable(options, 'hermes')
         if (options.sessionMode === 'managed') {
             const sessionId = providerSessionId(options.providerState)
             const sessionArg = sessionId
                 ? ` --resume ${quoteShell(sessionId)}`
                 : ' --source agent-nexus'
-            return `hermes chat --quiet --yolo${sessionArg} -q ${promptExpr}`
+            return `${executable} chat --quiet --yolo${sessionArg} -q ${promptExpr}`
         }
-        return `hermes -z ${promptExpr}`
+        return `${executable} -z ${promptExpr}`
     }
 
     protected parseText(stdout: string, stderr: string) {

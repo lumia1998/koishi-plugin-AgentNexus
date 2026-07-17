@@ -75,6 +75,16 @@ export interface HostStatus {
     agents: DetectedAgent[]
     sessionCount: number
     lastConnectedAt?: number
+    environment?: SshEnvironmentInfo
+}
+
+export interface SshEnvironmentInfo {
+    source: 'interactive' | 'noninteractive' | 'fallback'
+    home: string
+    shell?: string
+    pathEntries: number
+    variables: number
+    warning?: string
 }
 
 export interface NexusStatus {
@@ -142,6 +152,43 @@ export interface TerminalInfo {
     hostId: string
     url: string
     token: string
+}
+
+export type RemoteFileType = 'file' | 'directory' | 'symlink' | 'other'
+
+export interface RemoteFileEntry {
+    name: string
+    path: string
+    type: RemoteFileType
+    size: number
+    modifiedAt: number
+    mode: number
+}
+
+export interface RemoteFileListing {
+    hostId: string
+    root: string
+    path: string
+    parent?: string
+    entries: RemoteFileEntry[]
+}
+
+export interface RemoteFilePreview {
+    hostId: string
+    path: string
+    name: string
+    size: number
+    mimeType: string
+    encoding: 'utf8' | 'base64' | 'none'
+    content: string
+    truncated: boolean
+}
+
+export interface RemoteFileDownload {
+    hostId: string
+    path: string
+    name: string
+    url: string
 }
 
 export interface NexusConsoleData {

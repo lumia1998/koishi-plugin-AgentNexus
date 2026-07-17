@@ -11,7 +11,8 @@ export class OpenClawAdapter extends CodeAgentAdapter {
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
         const agent = options.openclawAgent || options.runtime.openclawAgent || 'default'
-        return `openclaw agent --local --agent ${quoteShell(agent)} --message ${promptExpr} --json`
+        const executable = this.executable(options, 'openclaw')
+        return `${executable} agent --local --agent ${quoteShell(agent)} --message ${promptExpr} --json`
     }
 
     protected parseText(stdout: string, stderr: string) {

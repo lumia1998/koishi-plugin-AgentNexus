@@ -17,12 +17,15 @@ export class NexusListAgentsTool extends NexusToolBase {
 
     async _call(input: { hostId?: string; refresh?: boolean }) {
         try {
+            const resolvedHostId = input.hostId
+                ? this.nexus.resolveHostId(input.hostId)
+                : undefined
             const status = input.refresh
-                ? await this.nexus.scanAgents(input.hostId)
+                ? await this.nexus.scanAgents(resolvedHostId)
                 : this.nexus.getStatus()
 
             const hosts = status.hosts.filter((h) =>
-                input.hostId ? h.id === input.hostId : true
+                resolvedHostId ? h.id === resolvedHostId : true
             )
             if (!hosts.length) return 'No hosts configured.'
 

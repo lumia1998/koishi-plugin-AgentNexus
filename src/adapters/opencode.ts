@@ -14,7 +14,7 @@ export class OpenCodeAdapter extends CodeAgentAdapter {
     }
 
     buildInnerCommand(promptExpr: string, options: DelegateOptions) {
-        const parts = ['opencode', 'run', '--format', 'json']
+        const parts = [this.executable(options, 'opencode'), 'run', '--format', 'json']
         if (options.runtime.opencodeAuto) parts.push('--auto')
         if (options.model) parts.push('-m', quoteShell(options.model))
         parts.push(promptExpr)

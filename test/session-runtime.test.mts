@@ -484,6 +484,15 @@ test('builds and parses Hermes managed chat session commands', () => {
         "hermes chat --quiet --yolo --resume '20260717_120000_a1b2c3' -q \"$PROMPT\""
     )
     assert.equal(
+        adapter.buildInnerCommand('"$PROMPT"', {
+            prompt: 'hello',
+            runtime,
+            sessionMode: 'managed',
+            executablePath: '/opt/hermes/bin/hermes'
+        }),
+        "'/opt/hermes/bin/hermes' chat --quiet --yolo --source agent-nexus -q \"$PROMPT\""
+    )
+    assert.equal(
         extractHermesSessionId(
             'warning\nsession_id: old\n\nsession_id: 20260717_120000_a1b2c3\n'
         ),

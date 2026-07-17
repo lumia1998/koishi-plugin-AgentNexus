@@ -135,6 +135,8 @@ AgentNexus (Koishi 插件)
 - [x] ChatLuna conversation 隔离及直接消息选择/确认续接
 - [x] `nexus <agent> <设备>` 交互模式、可配置空闲 TTL 与 `-q` 退出
 - [x] Hermes native session checkpoint：quiet query + session_id + resume
+- [x] SSH login/interactive 环境探测与绝对 Agent 路径执行
+- [x] SFTP 文件管理：浏览、预览、编辑、上传下载、新建目录、重命名和安全删除
 - [ ] 真实 SSH 联调（Linux 远端优先）
 - [ ] OpenClaw 在不同安装形态下的探测增强
 - [ ] Skill 同步失败重试 / 增量更新状态展示
@@ -218,7 +220,8 @@ koishi-plugin-AgentNexus/
 
 1. **Computer**：配置单一默认 SSH Computer，连接后自动扫描 Agent 状态
 2. **Skills**：仓库 URL 导入、同步状态和软链状态
-3. **终端**：进入页面后自动创建一个 xterm SSH 终端
+3. **文件**：基于共享 SSH 连接的 SFTP 文件管理，限制在设备工作目录内
+4. **终端**：进入页面后自动创建一个 xterm SSH 终端
 
 ### 6.3 配置落盘
 

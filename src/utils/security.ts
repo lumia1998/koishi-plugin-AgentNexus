@@ -41,5 +41,6 @@ export function isRemotePathWithinRoot(remotePath: string, root: string): boolea
     if (!remotePath.startsWith('/') || !root.startsWith('/')) return false
     const target = path.posix.normalize(remotePath)
     const base = path.posix.normalize(root).replace(/\/$/, '') || '/'
+    if (base === '/') return target.startsWith('/')
     return target === base || target.startsWith(`${base}/`)
 }

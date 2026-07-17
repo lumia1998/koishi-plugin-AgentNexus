@@ -19,6 +19,7 @@ export function apply(ctx: Context) {
     })
 
     const nexus = () => ctx.agent_nexus as AgentNexusService
+    const fileAuthority = { authority: nexus().commandAuthority }
 
     ctx.console.addListener('agent-nexus/getConfig', async () => nexus().getConfig())
     ctx.console.addListener('agent-nexus/getStatus', async () => nexus().getStatus())
@@ -79,6 +80,65 @@ export function apply(ctx: Context) {
     })
 
     ctx.console.addListener(
+        'agent-nexus/listFiles',
+        async (input: { hostId?: string; path?: string } = {}) =>
+            nexus().listRemoteFiles(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/previewFile',
+        async (input: { hostId?: string; path: string }) =>
+            nexus().previewRemoteFile(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/uploadFile',
+        async (input: {
+            hostId?: string
+            path: string
+            contentBase64: string
+        }) => nexus().uploadRemoteFile(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/saveTextFile',
+        async (input: { hostId?: string; path: string; content: string }) =>
+            nexus().saveRemoteText(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/createDirectory',
+        async (input: { hostId?: string; parent: string; name: string }) =>
+            nexus().createRemoteDirectory(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/renameFile',
+        async (input: { hostId?: string; path: string; newName: string }) =>
+            nexus().renameRemoteFile(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/deleteFile',
+        async (input: { hostId?: string; path: string }) =>
+            nexus().deleteRemoteFile(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
+        'agent-nexus/downloadFile',
+        async (input: { hostId?: string; path: string }) =>
+            nexus().downloadRemoteFile(input),
+        fileAuthority
+    )
+
+    ctx.console.addListener(
         'agent-nexus/openTerminal',
         async function (
             this: { id: string },
@@ -134,6 +194,42 @@ declare module '@koishijs/plugin-console' {
             hostId?: string
         }): Promise<{ success: boolean; skill?: import('../types').SkillInfo }>
         'agent-nexus/listSkills'(hostId?: string): Promise<import('../types').SkillInfo[]>
+        'agent-nexus/listFiles'(input?: {
+            hostId?: string
+            path?: string
+        }): Promise<import('../types').RemoteFileListing>
+        'agent-nexus/previewFile'(input: {
+            hostId?: string
+            path: string
+        }): Promise<import('../types').RemoteFilePreview>
+        'agent-nexus/uploadFile'(input: {
+            hostId?: string
+            path: string
+            contentBase64: string
+        }): Promise<{ success: boolean; path: string }>
+        'agent-nexus/saveTextFile'(input: {
+            hostId?: string
+            path: string
+            content: string
+        }): Promise<{ success: boolean; path: string }>
+        'agent-nexus/createDirectory'(input: {
+            hostId?: string
+            parent: string
+            name: string
+        }): Promise<{ success: boolean; path: string }>
+        'agent-nexus/renameFile'(input: {
+            hostId?: string
+            path: string
+            newName: string
+        }): Promise<{ success: boolean; path: string }>
+        'agent-nexus/deleteFile'(input: {
+            hostId?: string
+            path: string
+        }): Promise<{ success: boolean }>
+        'agent-nexus/downloadFile'(input: {
+            hostId?: string
+            path: string
+        }): Promise<import('../types').RemoteFileDownload>
         'agent-nexus/openTerminal'(input?: {
             hostId?: string
             cols?: number

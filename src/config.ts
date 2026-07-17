@@ -17,6 +17,8 @@ export interface Config {
     maxConcurrentPerUser: number
     interactiveSessionTtlMs: number
     maxOutputBytes: number
+    fileManagerMaxUploadBytes: number
+    fileManagerMaxPreviewBytes: number
     commandUsers: string[]
     commandChannels: string[]
 }
@@ -53,6 +55,16 @@ export const Config: Schema<Config> = Schema.object({
         .max(67108864)
         .default(4194304)
         .description('单次 SSH 命令 stdout/stderr 最大捕获字节数'),
+    fileManagerMaxUploadBytes: Schema.number()
+        .min(1048576)
+        .max(268435456)
+        .default(32 * 1024 * 1024)
+        .description('SFTP 文件管理单文件上传上限（字节）'),
+    fileManagerMaxPreviewBytes: Schema.number()
+        .min(65536)
+        .max(8388608)
+        .default(1024 * 1024)
+        .description('SFTP 文件预览最大读取字节数'),
     commandUsers: Schema.array(String)
         .default([])
         .description('允许调用 nexus.* 的用户 ID 白名单；留空表示只检查权限等级'),
