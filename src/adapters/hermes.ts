@@ -20,6 +20,13 @@ export class HermesAdapter extends CodeAgentAdapter {
         return `hermes -z ${promptExpr}`
     }
 
+    protected parseText(stdout: string, stderr: string) {
+        return super.parseText(
+            cleanHermesCliNoise(stdout),
+            cleanHermesCliNoise(stderr)
+        )
+    }
+
     parseResult(
         stdout: string,
         stderr: string,
@@ -40,6 +47,21 @@ export class HermesAdapter extends CodeAgentAdapter {
     }
 }
 
+/** Remove Hermes CLI metadata that must not be shown as the agent reply. */
+export function cleanHermesCliNoise(text: string) {
+    return text
+        .split(/\r?\n/)
+        .filter((line) => {
+            const plain = line.replace(ANSI_ESCAPE, '').trim()
+            return (
+                !/^Warning:\s*Unknown toolsets:\s*.+$/i.test(plain) &&
+                !/^session_id:\s*\S+\s*$/i.test(plain)
+            )
+        })
+        .join('\n')
+        .trim()
+}
+
 export function extractHermesSessionId(stderr: string) {
     let sessionId: string | undefined
     for (const line of stderr.split(/\r?\n/)) {
@@ -54,3 +76,5 @@ function providerSessionId(state: DelegateOptions['providerState']) {
         ? state.sessionId.trim()
         : undefined
 }
+
+const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g

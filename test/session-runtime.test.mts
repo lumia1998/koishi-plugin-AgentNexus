@@ -5,6 +5,7 @@ import { MemorySessionStorage } from '../src/sessions/storage.ts'
 import { AgentRunner, type DelegateResult } from '../src/runtime/runner.ts'
 import { buildSessionPrompt } from '../src/runtime/prompt.ts'
 import {
+    cleanHermesCliNoise,
     extractHermesSessionId,
     HermesAdapter
 } from '../src/adapters/hermes.ts'
@@ -489,7 +490,7 @@ test('builds and parses Hermes managed chat session commands', () => {
         '20260717_120000_a1b2c3'
     )
     const result = adapter.parseResult(
-        '搜索结果',
+        'Warning: Unknown toolsets: messaging\n搜索结果',
         '\nsession_id: 20260717_120000_a1b2c3\n',
         0,
         false,
@@ -497,6 +498,16 @@ test('builds and parses Hermes managed chat session commands', () => {
     )
     assert.equal(result.text, '搜索结果')
     assert.equal(result.providerState?.sessionId, '20260717_120000_a1b2c3')
+    assert.equal(
+        cleanHermesCliNoise(
+            '\u001b[1;31mWarning: Unknown toolsets: messaging\u001b[0m\n正常回复'
+        ),
+        '正常回复'
+    )
+    assert.equal(
+        cleanHermesCliNoise('Warning: 模型即将限流\n正常回复'),
+        'Warning: 模型即将限流\n正常回复'
+    )
 })
 
 test('accepts the requested trailing -q interactive exit syntax', () => {

@@ -84,6 +84,12 @@ Hermes 的 Tool/Skill transcript。Nexus 仍负责用户路由、TTL、并发、
 Hermes session 只作为 provider checkpoint。普通 `delegate()` one-shot 调用仍使用
 `hermes -z`。
 
+Hermes chat 会继承远端设备的 `~/.hermes/config.yaml`。如果回复中反复出现
+`Warning: Unknown toolsets: messaging`，说明 Hermes 升级后仍保留了已经移除的旧
+`messaging` toolset；请在远端运行 `hermes tools` 重新保存工具配置，或从
+`platform_toolsets.cli` 中删除 `messaging`。AgentNexus 会过滤这条启动警告，避免
+它污染聊天回复，但清理远端配置才能恢复正确的 Hermes 工具集。
+
 当 Agent 或 Skill 需要用户输入时，可以返回结构化控制结果：
 
 ```json
