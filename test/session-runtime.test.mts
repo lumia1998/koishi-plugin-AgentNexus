@@ -7,7 +7,8 @@ import { buildSessionPrompt } from '../src/runtime/prompt.ts'
 import {
     cleanHermesCliNoise,
     extractHermesSessionId,
-    HermesAdapter
+    HermesAdapter,
+    stripHermesMcpShutdownNoise
 } from '../src/adapters/hermes.ts'
 import { parseInteractiveCommandInput } from '../src/utils/command.ts'
 import {
@@ -581,6 +582,36 @@ test('builds and parses Hermes managed chat session commands', () => {
         ),
         'BLUE-47'
     )
+    const shutdownTrace = `Exception ignored in: <coroutine object MCPServerTask.run at 0x7c5df9aae5c0>
+Traceback (most recent call last):
+  File "/home/lumia/.hermes/hermes-agent/tools/mcp_tool.py", line 2947, in run
+    parked = await self._wait_for_reconnect_or_shutdown()
+  File "/home/lumia/.local/share/uv/python/cpython-3.11/lib/python3.11/asyncio/base_events.py", line 520, in _check_closed
+    raise RuntimeError('Event loop is closed')
+RuntimeError: Event loop is closed`
+    assert.equal(
+        stripHermesMcpShutdownNoise(
+            `正常回复前\n${shutdownTrace}\n${shutdownTrace}\n正常回复后`
+        ),
+        '正常回复前\n正常回复后'
+    )
+    assert.equal(
+        stripHermesMcpShutdownNoise(
+            'Exception ignored in: <coroutine object MCPServerTask.run at 0x123>\nTraceback (most recent call last):'
+        ),
+        'Exception ignored in: <coroutine object MCPServerTask.run at 0x123>\nTraceback (most recent call last):'
+    )
+    const cleaned = adapter.parseResult(
+        '搞定了。\npdf_path=/workspace/comic.pdf\npdf_size=5.0MB\npdf_password=972350',
+        `${shutdownTrace}\n${shutdownTrace}`,
+        0,
+        false,
+        first
+    )
+    assert.doesNotMatch(cleaned.text, /Traceback|Event loop|pdf_path/)
+    assert.match(cleaned.text, /解压密码：972350/)
+    assert.deepEqual(cleaned.files, ['/workspace/comic.pdf'])
+    assert.doesNotMatch(cleaned.raw, /MCPServerTask|Event loop is closed/)
 })
 
 test('accepts the requested trailing -q interactive exit syntax', () => {

@@ -241,7 +241,8 @@ export class SshSession {
         return new Promise((resolve, reject) => {
             let stdout = ''
             let stderr = ''
-            let outputBytes = 0
+            let stdoutBytes = 0
+            let stderrBytes = 0
             let settled = false
             let timedOut = false
             let truncated = false
@@ -277,14 +278,20 @@ export class SshSession {
             }
             if (abortSignal?.aborted) abort()
 
-            const append = (current: string, data: Buffer) => {
-                const available = this.maxOutputBytes - outputBytes
+            const append = (
+                current: string,
+                data: Buffer,
+                streamName: 'stdout' | 'stderr'
+            ) => {
+                const used = streamName === 'stdout' ? stdoutBytes : stderrBytes
+                const available = this.maxOutputBytes - used
                 if (available <= 0) {
                     truncated = true
                     return current
                 }
                 const chunk = data.length > available ? data.subarray(0, available) : data
-                outputBytes += chunk.length
+                if (streamName === 'stdout') stdoutBytes += chunk.length
+                else stderrBytes += chunk.length
                 if (chunk.length < data.length) truncated = true
                 return current + chunk.toString('utf8')
             }
@@ -307,10 +314,10 @@ export class SshSession {
                 }
                 stream = ch
                 ch.on('data', (data: Buffer) => {
-                    stdout = append(stdout, data)
+                    stdout = append(stdout, data, 'stdout')
                 })
                 ch.stderr.on('data', (data: Buffer) => {
-                    stderr = append(stderr, data)
+                    stderr = append(stderr, data, 'stderr')
                 })
                 ch.on('close', (code: number, signal: string) => {
                     finish(code ?? 0, signal)

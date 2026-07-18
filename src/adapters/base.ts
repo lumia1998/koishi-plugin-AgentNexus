@@ -1,5 +1,6 @@
 import type {
     AgentKind,
+    AgentArtifact,
     AgentProviderState,
     AgentResult,
     AgentRuntimeOptions
@@ -82,8 +83,18 @@ export abstract class CodeAgentAdapter {
         timedOut: boolean,
         command: string
     ): AgentResult {
-        const files = extractPaths(stdout + '\n' + stderr)
-        const text = cleanAgentText(this.parseText(stdout, stderr))
+        const source = stdout + '\n' + stderr
+        const artifacts = extractArtifacts(source)
+        const files = Array.from(
+            new Set([
+                ...extractPaths(source),
+                ...artifacts.map((artifact) => artifact.path)
+            ])
+        ).slice(0, 20)
+        const text = formatArtifactReply(
+            cleanAgentText(this.parseText(stdout, stderr), artifacts),
+            artifacts
+        )
         const images = files.filter((p) =>
             /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(p)
         )
@@ -92,6 +103,7 @@ export abstract class CodeAgentAdapter {
             text,
             files,
             images,
+            artifacts: artifacts.length ? artifacts : undefined,
             raw: stdout || stderr,
             exitCode,
             timedOut,
@@ -132,11 +144,86 @@ function pickText(stdout: string, stderr: string) {
     return out
 }
 
-export function cleanAgentText(text: string) {
+export function cleanAgentText(
+    text: string,
+    artifacts: AgentArtifact[] = []
+) {
     return text
         .replace(/<nexus_files>[\s\S]*?<\/nexus_files>/gi, '')
+        .split(/\r?\n/)
+        .filter(
+            (line) =>
+                !artifacts.length || !ARTIFACT_LINE.test(line.trim())
+        )
+        .join('\n')
         .replace(/\n{3,}/g, '\n\n')
         .trim()
+}
+
+const ARTIFACT_LINE = /^(?:pdf_path|file_path|pdf_size|file_size|pdf_password|password|manga|title|漫画|文件大小|文件密码|解压密码)\s*[:=]/i
+
+export function extractArtifacts(text: string): AgentArtifact[] {
+    const artifacts: AgentArtifact[] = []
+    let current: Partial<AgentArtifact> | undefined
+    const flush = () => {
+        if (current?.path && isLocalPath(current.path)) {
+            artifacts.push(current as AgentArtifact)
+        }
+        current = undefined
+    }
+    for (const line of text.split(/\r?\n/)) {
+        const match = line
+            .trim()
+            .match(/^(pdf_path|file_path|pdf_size|file_size|pdf_password|password|manga|title|漫画|文件大小|文件密码|解压密码)\s*[:=]\s*(.*)$/i)
+        if (!match) continue
+        const key = match[1].toLowerCase()
+        const value = match[2].trim()
+        if (key === 'pdf_path' || key === 'file_path') {
+            flush()
+            current = { path: value }
+            continue
+        }
+        current ??= {}
+        if (
+            key === 'pdf_size' ||
+            key === 'file_size' ||
+            key === '文件大小'
+        ) {
+            current.size = value
+        } else if (
+            key === 'pdf_password' ||
+            key === 'password' ||
+            key === '文件密码' ||
+            key === '解压密码'
+        ) {
+            current.password = value
+        } else if (key === 'manga' || key === 'title' || key === '漫画') {
+            current.title = value
+        }
+    }
+    flush()
+    return artifacts
+}
+
+function formatArtifactReply(text: string, artifacts: AgentArtifact[]) {
+    const details: string[] = []
+    for (const artifact of artifacts) {
+        if (artifact.title && !text.includes(artifact.title)) {
+            details.push(`漫画：${artifact.title}`)
+        }
+        if (artifact.size && !text.includes(artifact.size)) {
+            details.push(`文件大小：${artifact.size}`)
+        }
+        if (
+            artifact.password !== undefined &&
+            (!artifact.password || !text.includes(artifact.password))
+        ) {
+            details.push(
+                `解压密码：${artifact.password || 'Skill 未返回密码'}`
+            )
+        }
+    }
+    return [text, ...details].filter(Boolean).join('\n')
 }
 
 const FILE_EXT =
@@ -148,10 +235,12 @@ export function extractPaths(text: string): string[] {
     const blocks = text.matchAll(/<nexus_files>([\s\S]*?)<\/nexus_files>/gi)
     for (const block of blocks) {
         for (const line of block[1].split(/\r?\n/)) {
-            const p = line.trim()
+            const p = artifactPath(line.trim()) ?? line.trim()
             if (isLocalPath(p)) found.add(p)
         }
     }
+
+    for (const artifact of extractArtifacts(text)) found.add(artifact.path)
 
     const md = text.matchAll(/!?\[[^\]]*]\(([^)\s]+)\)/g)
     for (const item of md) {
@@ -162,6 +251,11 @@ export function extractPaths(text: string): string[] {
     }
 
     return Array.from(found).slice(0, 20)
+}
+
+function artifactPath(value: string) {
+    const match = value.match(/^(?:pdf_path|file_path)\s*[:=]\s*(.+)$/i)
+    return match?.[1].trim()
 }
 
 function isLocalPath(value: string) {

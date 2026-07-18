@@ -54,9 +54,13 @@ export class HermesAdapter extends CodeAgentAdapter {
 
 /** Remove Hermes CLI metadata that must not be shown as the agent reply. */
 export function cleanHermesCliNoise(text: string) {
-    return text
+    return stripHermesMcpShutdownNoise(
+        text
         .split(/\r?\n/)
         .map((line) => stripAnsi(line))
+        .join('\n')
+    )
+        .split(/\r?\n/)
         .filter(
             (line) => {
                 const value = line.trim()
@@ -71,6 +75,36 @@ export function cleanHermesCliNoise(text: string) {
         )
         .join('\n')
         .trim()
+}
+
+export function stripHermesMcpShutdownNoise(text: string) {
+    const output: string[] = []
+    let candidate: string[] | undefined
+    for (const line of text.split(/\r?\n/)) {
+        const value = stripAnsi(line).trim()
+        const starts = /^Exception ignored in:\s*<coroutine object MCPServerTask\.run(?: at 0x[0-9a-f]+)?>$/i.test(
+            value
+        )
+        if (!candidate) {
+            if (starts) candidate = [line]
+            else output.push(line)
+            continue
+        }
+        if (starts) {
+            output.push(...candidate)
+            candidate = [line]
+            continue
+        }
+        candidate.push(line)
+        if (/^RuntimeError:\s*Event loop is closed$/i.test(value)) {
+            candidate = undefined
+        } else if (candidate.length > 200) {
+            output.push(...candidate)
+            candidate = undefined
+        }
+    }
+    if (candidate) output.push(...candidate)
+    return output.join('\n')
 }
 
 export function extractHermesSessionId(stderr: string) {

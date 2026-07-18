@@ -14,7 +14,12 @@ import { CodexAdapter } from '../src/adapters/codex.ts'
 import { HermesAdapter } from '../src/adapters/hermes.ts'
 import { OpenClawAdapter } from '../src/adapters/openclaw.ts'
 import { OpenCodeAdapter } from '../src/adapters/opencode.ts'
-import { cleanAgentText, extractPaths, parseJsonLines } from '../src/adapters/base.ts'
+import {
+    cleanAgentText,
+    extractArtifacts,
+    extractPaths,
+    parseJsonLines
+} from '../src/adapters/base.ts'
 import { syncSkillSource } from '../src/skills/sync.ts'
 import { resolveSecret } from '../src/utils/shell.ts'
 import {
@@ -502,6 +507,47 @@ test('resolves SSH hosts by ID, address, name, and connection target', () => {
     assert.equal(resolveHostReference(hosts, 'lumia@10.1.2.50:22')?.id, 'host-50')
 })
 
+test('parses labeled PDF artifacts and hides internal paths from replies', () => {
+    const output = `搞定了。
+pdf_path=/home/lumia/work/downloads/766045.pdf
+pdf_size=5.0MB
+pdf_password=972350
+漫画=[星穹铁道]花火的恶作剧惩罚`
+    const result = new HermesAdapter().parseResult(
+        output,
+        '',
+        0,
+        false,
+        'hermes chat'
+    )
+    assert.deepEqual(result.files, [
+        '/home/lumia/work/downloads/766045.pdf'
+    ])
+    assert.deepEqual(extractArtifacts(output), [
+        {
+            path: '/home/lumia/work/downloads/766045.pdf',
+            size: '5.0MB',
+            password: '972350',
+            title: '[星穹铁道]花火的恶作剧惩罚'
+        }
+    ])
+    assert.doesNotMatch(result.text, /pdf_path|\/home\/lumia/)
+    assert.match(result.text, /文件大小：5\.0MB/)
+    assert.match(result.text, /解压密码：972350/)
+    assert.match(result.text, /漫画：\[星穹铁道]/)
+})
+
+test('states explicitly when a PDF skill returns an empty password', () => {
+    const result = new HermesAdapter().parseResult(
+        'pdf_path=/workspace/a.pdf\npdf_password=',
+        '',
+        0,
+        false,
+        'hermes chat'
+    )
+    assert.equal(result.text, '解压密码：Skill 未返回密码')
+})
+
 test('list agents accepts a device name instead of filtering only by host id', async () => {
     const status = {
         enabled: true,
@@ -776,6 +822,26 @@ test('shares an in-flight SFTP initialization', async () => {
     assert.equal(calls, 1)
     assert.equal(first, wrapper)
     assert.equal(second, wrapper)
+})
+
+test('keeps stdout capacity when stderr reaches its own output limit', async () => {
+    const session = sshSession(5)
+    ;(session as any).client = {
+        exec(_command: string, callback: (err: Error | undefined, channel: any) => void) {
+            const channel = new EventEmitter() as any
+            channel.stderr = new EventEmitter()
+            channel.signal = () => undefined
+            channel.close = () => undefined
+            callback(undefined, channel)
+            channel.stderr.emit('data', Buffer.from('errors'))
+            channel.emit('data', Buffer.from('reply'))
+            channel.emit('close', 0, '')
+        }
+    }
+    const result = await session.exec('echo test')
+    assert.equal(result.stderr, 'error')
+    assert.equal(result.stdout, 'reply')
+    assert.equal(result.truncated, true)
 })
 
 test('detects every supported agent through the shared SSH probe', async () => {

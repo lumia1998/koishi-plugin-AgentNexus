@@ -142,11 +142,19 @@ export interface AgentProviderState {
     [key: string]: unknown
 }
 
+export interface AgentArtifact {
+    path: string
+    size?: string
+    password?: string
+    title?: string
+}
+
 export interface AgentResult {
     agent: AgentKind
     text: string
     files: string[]
     images: string[]
+    artifacts?: AgentArtifact[]
     raw: string
     exitCode: number
     timedOut: boolean
