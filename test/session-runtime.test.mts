@@ -385,7 +385,7 @@ test('keeps the newest message and valid JSON when prompt context is large', () 
         expireAt: 0
     }
     const prompt = buildSessionPrompt(session)
-    const context = prompt.split('Nexus Session:\n')[1]
+    const context = prompt.split('AgentNexus continuation data:\n')[1]
     const parsed = JSON.parse(context)
     assert.equal(parsed.messages.at(-1).content, '最新选择：2')
     assert.ok(context.length <= 25000)
@@ -574,6 +574,12 @@ test('builds and parses Hermes managed chat session commands', () => {
     assert.equal(
         cleanHermesCliNoise('Warning: 模型即将限流\n正常回复'),
         'Warning: 模型即将限流\n正常回复'
+    )
+    assert.equal(
+        cleanHermesCliNoise(
+            '↻ Resumed session 20260718_143351_4768ad (1 user message, 2 total messages)\nBLUE-47'
+        ),
+        'BLUE-47'
     )
 })
 

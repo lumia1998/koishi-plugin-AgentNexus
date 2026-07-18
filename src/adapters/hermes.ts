@@ -58,9 +58,16 @@ export function cleanHermesCliNoise(text: string) {
         .split(/\r?\n/)
         .map((line) => stripAnsi(line))
         .filter(
-            (line) =>
-                !/^Warning:\s*Unknown toolsets:\s*.+$/i.test(line.trim()) &&
-                !/^session_id:\s*\S+\s*$/i.test(line.trim())
+            (line) => {
+                const value = line.trim()
+                return (
+                    !/^Warning:\s*Unknown toolsets:\s*.+$/i.test(value) &&
+                    !/^session_id:\s*\S+\s*$/i.test(value) &&
+                    !/^[↻⟳]?\s*Resumed session\s+\S+\s+\(.+\)\s*$/i.test(
+                        value
+                    )
+                )
+            }
         )
         .join('\n')
         .trim()

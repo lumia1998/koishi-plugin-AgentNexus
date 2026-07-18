@@ -170,6 +170,31 @@ test('uses Claude Code single-result JSON without session persistence', () => {
         command
     )
     assert.equal(result.text, 'final answer')
+    assert.equal(result.providerState, undefined)
+
+    const managed = adapter.buildInnerCommand('"$PROMPT"', {
+        prompt: '',
+        runtime: {
+            openclawAgent: 'default',
+            claudeSkipPermissions: false,
+            codexBypassSandbox: false,
+            opencodeAuto: true,
+            defaultTimeoutMs: 1000
+        },
+        sessionMode: 'managed',
+        providerState: { sessionId: 'claude-session-id' }
+    })
+    assert.match(managed, /--resume 'claude-session-id'/)
+    assert.match(managed, /--append-system-prompt/)
+    assert.doesNotMatch(managed, /--no-session-persistence/)
+    const resumed = adapter.parseResult(
+        JSON.stringify({ result: 'continued', session_id: 'claude-session-id' }),
+        '',
+        0,
+        false,
+        managed
+    )
+    assert.equal(resumed.providerState?.sessionId, 'claude-session-id')
 })
 
 test('uses current OpenClaw JSON agent invocation', () => {
@@ -746,6 +771,42 @@ test('shares an in-flight SFTP initialization', async () => {
     assert.equal(calls, 1)
     assert.equal(first, wrapper)
     assert.equal(second, wrapper)
+})
+
+test('detects every supported agent through the shared SSH probe', async () => {
+    const adapters = [
+        new HermesAdapter(),
+        new OpenClawAdapter(),
+        new ClaudeAdapter(),
+        new OpenCodeAdapter(),
+        new CodexAdapter()
+    ]
+    for (const adapter of adapters) {
+        const bin = adapter.binNames[0]
+        const executable = `/home/lumia/.${adapter.kind}/bin/${bin}`
+        const session = {
+            async exec(command: string) {
+                if (command.includes('--version')) {
+                    return {
+                        exitCode: 0,
+                        stdout: `${bin} smoke-version\n`,
+                        stderr: '',
+                        timedOut: false
+                    }
+                }
+                return {
+                    exitCode: 0,
+                    stdout: `${executable}\n`,
+                    stderr: '',
+                    timedOut: false
+                }
+            }
+        }
+        const result = await adapter.detect(session as any)
+        assert.equal(result.installed, true, adapter.kind)
+        assert.equal(result.path, executable, adapter.kind)
+        assert.equal(result.version, `${bin} smoke-version`, adapter.kind)
+    }
 })
 
 test('parses interactive SSH environment markers and removes volatile variables', () => {

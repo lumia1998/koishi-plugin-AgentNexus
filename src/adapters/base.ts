@@ -192,6 +192,7 @@ function buildDetectCommand(bin: string) {
         `  for d in`,
         `    "$HOME/.local/bin"`,
         `    "$HOME/.hermes/bin"`,
+        `    "$HOME/.openclaw/bin"`,
         `    "$HOME/.cargo/bin"`,
         `    "$HOME/.npm-global/bin"`,
         `    "$HOME/go/bin"`,

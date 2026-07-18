@@ -17,9 +17,9 @@ export function buildSessionPrompt(session: NexusSession) {
     const messages = selectMessages(session, state)
     const context = JSON.stringify({ state, messages }, null, 2)
 
-    return `你是 AgentNexus 调用的无状态推理引擎。Hermes/Claude/Codex 等 CLI 不保存会话；下面的 Nexus Session 是本次任务的唯一上下文来源。
+    return `请继续处理用户已经开始的任务。下面的内容由本地 AgentNexus 从同一段对话中整理，用于恢复此前的消息和任务进度。
 
-请基于完整会话状态继续当前任务，不要把用户的短回复当成一个全新的任务。如果状态包含 pendingAction/resumeAction，先消费该输入，再继续原 Skill 或任务。
+请按 messages 的先后顺序理解上下文，并回答最后一条 user 消息。不要把用户的短回复当成全新任务。state 是运行时数据；如果包含 pendingAction、resumeAction 或 skillState，请据此继续原任务。
 
 当任务需要用户输入、确认或选择时，不要假装任务已经完成。请在最终输出中返回以下控制协议之一（可以放在 <nexus_session> 标签中）：
 {"protocol":"nexus-session/v1","status":"waiting_input","prompt":"需要用户提供的内容","data":{}}
@@ -30,7 +30,7 @@ export function buildSessionPrompt(session: NexusSession) {
 失败时可以返回：
 {"status":"failed","error":"失败原因"}
 
-Nexus Session:
+AgentNexus continuation data:
 ${context}`
 }
 
@@ -50,6 +50,22 @@ export function buildSessionContinuationPrompt(session: NexusSession) {
 如果仍需要用户输入，请继续使用 nexus-session/v1 waiting_input 或 waiting_confirm 控制协议。
 
 ${JSON.stringify(payload, null, 2)}`
+}
+
+export function buildProviderTurnPrompt(session: NexusSession) {
+    const latest = [...session.messages]
+        .reverse()
+        .find((message) => message.role === 'user')
+    const state = {
+        resumeAction: compactValue(session.data?.resumeAction, 4000),
+        skillState: compactValue(session.data?.skillState, 4000)
+    }
+    const hasState = state.resumeAction !== undefined || state.skillState !== undefined
+    return `${latest?.content ?? ''}${
+        hasState
+            ? `\n\nAgentNexus runtime data for this turn:\n${JSON.stringify(state, null, 2)}`
+            : ''
+    }`
 }
 
 function selectMessages(session: NexusSession, state: unknown) {

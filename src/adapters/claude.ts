@@ -15,9 +15,15 @@ export class ClaudeAdapter extends CodeAgentAdapter {
             '-p',
             promptExpr,
             '--output-format',
-            'json',
-            '--no-session-persistence'
+            'json'
         ]
+        const sessionId = providerSessionId(options.providerState)
+        if (options.sessionMode === 'managed') {
+            if (sessionId) parts.push('--resume', quoteShell(sessionId))
+            parts.push('--append-system-prompt', quoteShell(NEXUS_SYSTEM_PROMPT))
+        } else {
+            parts.push('--no-session-persistence')
+        }
         if (options.model) {
             parts.push('--model', quoteShell(options.model))
         }
@@ -26,4 +32,40 @@ export class ClaudeAdapter extends CodeAgentAdapter {
         }
         return parts.join(' ')
     }
+
+    parseResult(
+        stdout: string,
+        stderr: string,
+        exitCode: number,
+        timedOut: boolean,
+        command: string
+    ) {
+        const result = super.parseResult(
+            stdout,
+            stderr,
+            exitCode,
+            timedOut,
+            command
+        )
+        if (!command.includes('--no-session-persistence')) {
+            try {
+                const value = JSON.parse(stdout)
+                const sessionId =
+                    typeof value?.session_id === 'string'
+                        ? value.session_id.trim()
+                        : ''
+                if (sessionId) result.providerState = { sessionId }
+            } catch {}
+        }
+        return result
+    }
+}
+
+const NEXUS_SYSTEM_PROMPT =
+    'You are connected through AgentNexus. Continue the current user task across turns. If you need user input or confirmation, append a <nexus_session> JSON block with status waiting_input or waiting_confirm, a prompt, and optional options/data. Otherwise answer normally.'
+
+function providerSessionId(state: DelegateOptions['providerState']) {
+    return typeof state?.sessionId === 'string' && state.sessionId.trim()
+        ? state.sessionId.trim()
+        : undefined
 }

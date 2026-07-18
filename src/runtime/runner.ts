@@ -11,6 +11,7 @@ import type {
     SessionIdentity
 } from '../sessions/types'
 import {
+    buildProviderTurnPrompt,
     buildSessionContinuationPrompt,
     buildSessionPrompt
 } from './prompt'
@@ -432,13 +433,18 @@ export class AgentRunner {
         })
 
         try {
-            const useNativeContinuation =
+            const useHermesContinuation =
                 session.agent === 'hermes' &&
                 execution.sessionMode === 'managed' &&
                 typeof execution.providerState?.sessionId === 'string'
+            const useClaudeSession =
+                session.agent === 'claude' &&
+                execution.sessionMode === 'managed'
             const result = await this.execute({
                 ...execution,
-                prompt: useNativeContinuation
+                prompt: useClaudeSession
+                    ? buildProviderTurnPrompt(session)
+                    : useHermesContinuation
                     ? buildSessionContinuationPrompt(session)
                     : buildSessionPrompt(session),
                 signal: controller.signal

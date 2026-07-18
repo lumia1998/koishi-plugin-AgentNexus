@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-agent-nexus",
   "description": "SSH-backed code agent gateway for ChatLuna (Hermes / OpenClaw / Claude Code / OpenCode / Codex)",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -26,7 +26,8 @@
     "build": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build.cjs'))\"",
     "build:client": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/build-client.cjs'))\"",
     "typecheck": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/typecheck.cjs'))\"",
-    "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\""
+    "test": "node -e \"require(require('path').join(process.env.INIT_CWD || process.cwd(), 'scripts/test.cjs'))\"",
+    "test:agents": "node ./scripts/smoke-agents.cjs"
   },
   "koishi": {
     "description": {
