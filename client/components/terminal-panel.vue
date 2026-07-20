@@ -79,6 +79,7 @@
                         <div
                             :ref="(el) => setHost(item.key, el)"
                             class="terminal-host"
+                            @wheel.stop
                         />
                         <div v-if="item.error" class="terminal-error">
                             <div>{{ item.error }}</div>
@@ -179,8 +180,7 @@ watch(
 watch(activeKey, async (key) => {
     if (!key) return
     await nextTick()
-    fitTab(key)
-    syncTabSize(key)
+    scheduleFit(key)
 })
 
 // Re-fit after v-show becomes true (display:none skips fit while hidden).
@@ -190,8 +190,7 @@ watch(
         if (visible === false) return
         await nextTick()
         if (activeKey.value) {
-            fitTab(activeKey.value)
-            syncTabSize(activeKey.value)
+            scheduleFit(activeKey.value)
         }
     }
 )
@@ -334,11 +333,11 @@ async function ensureRuntime(tab: TerminalTab, initialOutput = '') {
     const fit = new FitAddon()
     term.loadAddon(fit)
     term.open(host)
-    fit.fit()
     if (initialOutput) term.write(initialOutput)
 
     const runtime: TerminalRuntime = { term, fit }
     runtimeMap.set(tab.key, runtime)
+    scheduleFit(tab.key)
 
     term.onData((data) => {
         if (!runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return
@@ -346,8 +345,7 @@ async function ensureRuntime(tab: TerminalTab, initialOutput = '') {
     })
 
     runtime.observer = new ResizeObserver(() => {
-        fitTab(tab.key)
-        syncTabSize(tab.key)
+        scheduleFit(tab.key)
     })
     runtime.observer.observe(host)
     return runtime
@@ -457,6 +455,15 @@ function fitTab(key: string) {
     const rect = host.getBoundingClientRect()
     if (rect.width < 40 || rect.height < 40) return
     runtime.fit.fit()
+}
+
+function scheduleFit(key: string) {
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+            fitTab(key)
+            syncTabSize(key)
+        })
+    })
 }
 
 function syncTabSize(key: string) {
@@ -645,23 +652,26 @@ function syncTabSize(key: string) {
 
 .terminal-workspace {
     background: #0f1115;
+    min-height: 0;
 }
 
 .terminal-panes {
     min-height: 420px;
     background: #0f1115;
+    overscroll-behavior: contain;
 }
 
 .terminal-pane {
     position: relative;
     height: 100%;
+    min-height: 0;
 }
 
 .terminal-host {
     height: min(56vh, 520px);
     overflow: hidden;
-    padding: 12px 14px;
     box-sizing: border-box;
+    overscroll-behavior: contain;
 }
 
 .terminal-empty,
@@ -684,10 +694,14 @@ function syncTabSize(key: string) {
 
 :deep(.xterm) {
     height: 100%;
+    padding: 12px 14px;
+    box-sizing: border-box;
 }
 
 :deep(.xterm-viewport) {
     overflow-y: auto !important;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     scrollbar-width: thin;
     scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
 }

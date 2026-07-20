@@ -36,7 +36,8 @@ import { splitMessage } from '../src/utils/text.ts'
 import {
     buildAgentMaintenancePlan,
     isVersionNewer,
-    normalizeAgentVersion
+    normalizeAgentVersion,
+    validateAgentMaintenanceVersion
 } from '../src/agents/maintenance.ts'
 import { mimeType } from '../src/utils/mime.ts'
 import { SshSession } from '../src/ssh/session.ts'
@@ -901,6 +902,36 @@ test('builds fixed user-scope maintenance plans and compares agent versions', ()
     assert.equal(
         claude.command,
         "'/home/lumia/.local/bin/claude' update"
+    )
+
+    const homebrewClaude = buildAgentMaintenancePlan(
+        'claude',
+        true,
+        '/home/linuxbrew/.linuxbrew/bin/claude'
+    )
+    assert.equal(homebrewClaude.method, 'Homebrew（claude-code）')
+    assert.equal(
+        homebrewClaude.command,
+        "'/home/linuxbrew/.linuxbrew/bin/brew' upgrade 'claude-code'"
+    )
+
+    assert.equal(
+        validateAgentMaintenanceVersion(
+            'update',
+            '2.1.192 (Claude Code)',
+            '2.1.192 (Claude Code)',
+            '2.1.205'
+        ),
+        '更新命令已结束，但当前版本仍为 2.1.192，未达到最新版本 2.1.205。'
+    )
+    assert.equal(
+        validateAgentMaintenanceVersion(
+            'update',
+            '2.1.192 (Claude Code)',
+            '2.1.205 (Claude Code)',
+            '2.1.205'
+        ),
+        undefined
     )
 
     const hermes = buildAgentMaintenancePlan('hermes', false)

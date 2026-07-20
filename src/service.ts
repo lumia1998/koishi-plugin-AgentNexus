@@ -71,7 +71,8 @@ import { SftpFileManager } from './files/manager'
 import {
     buildAgentMaintenancePlan,
     isVersionNewer,
-    latestAgentVersion
+    latestAgentVersion,
+    validateAgentMaintenanceVersion
 } from './agents/maintenance'
 
 interface ManagedTerminal {
@@ -688,6 +689,13 @@ export class AgentNexusService extends Service {
             if (!agent.installed) {
                 throw new Error('安装命令已结束，但重新扫描仍未发现可执行文件。')
             }
+            const versionError = validateAgentMaintenanceVersion(
+                plan.action,
+                current.version,
+                agent.version,
+                agent.latestVersion
+            )
+            if (versionError) throw new Error(versionError)
             const agents = this.agentCache.get(host.id) ?? emptyAgents()
             this.agentCache.set(
                 host.id,

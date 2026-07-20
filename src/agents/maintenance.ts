@@ -75,11 +75,14 @@ export function buildAgentMaintenancePlan(
         }
     }
     if (kind === 'claude') {
+        const homebrew = executablePath && homebrewClaudeCommand(executablePath)
         return installed && executablePath
             ? {
                   action,
-                  method: 'Claude Code 内置更新器',
-                  command: `${quoteShell(executablePath)} update`
+                  method: homebrew
+                      ? 'Homebrew（claude-code）'
+                      : 'Claude Code 内置更新器',
+                  command: homebrew ?? `${quoteShell(executablePath)} update`
               }
             : {
                   action,
@@ -126,6 +129,38 @@ export function isVersionNewer(current?: string, latest?: string) {
     const right = normalizeAgentVersion(latest)
     if (!left || !right) return undefined
     return compareVersions(right, left) > 0
+}
+
+export function validateAgentMaintenanceVersion(
+    action: AgentMaintenancePlan['action'],
+    current?: string,
+    updated?: string,
+    latest?: string
+) {
+    if (action !== 'update') return
+    const before = normalizeAgentVersion(current)
+    const after = normalizeAgentVersion(updated)
+    const target = normalizeAgentVersion(latest)
+    if (!after) {
+        return '更新命令已结束，但无法读取更新后的版本，不能确认更新成功。'
+    }
+    if (target && compareVersions(after, target) < 0) {
+        return `更新命令已结束，但当前版本仍为 ${after}，未达到最新版本 ${target}。`
+    }
+    if (
+        before &&
+        compareVersions(after, before) <= 0 &&
+        (!target || compareVersions(before, target) < 0)
+    ) {
+        return `更新命令已结束，但版本仍为 ${after}，未发生更新。`
+    }
+}
+
+function homebrewClaudeCommand(executablePath: string) {
+    if (!/(?:homebrew|linuxbrew)/i.test(executablePath)) return
+    const brew = executablePath.replace(/[/\\]claude(?:\.exe)?$/i, '/brew')
+    if (brew === executablePath) return
+    return `${quoteShell(brew)} upgrade ${quoteShell('claude-code')}`
 }
 
 function compareVersions(left: string, right: string) {
